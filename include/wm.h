@@ -3,6 +3,7 @@
 
 #include <types.h>
 #include <multiboot.h>
+#include <window.h>
 
 void wm_init(struct multiboot_info *mb);
 void wm_update(void);

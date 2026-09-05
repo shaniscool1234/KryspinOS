@@ -30,6 +30,7 @@ static void seed_file(int idx, const char *name, const char *text, int parent) {
     struct cfs_entry *e = &sb->files[idx];
     memset(e, 0, sizeof(*e));
     strncpy(e->name, name, VFS_NAME_MAX - 1);
+    e->name[VFS_NAME_MAX - 1] = 0;
     e->type = VFS_FILE;
     e->used = 1;
     e->start_sector = (u16)(CFS_DATA_START + idx * CFS_MAX_FILE_SECTORS);
@@ -50,6 +51,7 @@ static void format_new(void) {
     }
     /* Create root directory */
     strncpy(sb->files[0].name, "/", VFS_NAME_MAX - 1);
+    sb->files[0].name[VFS_NAME_MAX - 1] = 0;
     sb->files[0].type = VFS_DIR;
     sb->files[0].used = 1;
     sb->files[0].size = 0;
@@ -57,18 +59,21 @@ static void format_new(void) {
     
     /* Create standard directories */
     strncpy(sb->files[1].name, "Documents", VFS_NAME_MAX - 1);
+    sb->files[1].name[VFS_NAME_MAX - 1] = 0;
     sb->files[1].type = VFS_DIR;
     sb->files[1].used = 1;
     sb->files[1].size = 0;
     sb->files[1].parent = 0;
     
     strncpy(sb->files[2].name, "Windows", VFS_NAME_MAX - 1);
+    sb->files[2].name[VFS_NAME_MAX - 1] = 0;
     sb->files[2].type = VFS_DIR;
     sb->files[2].used = 1;
     sb->files[2].size = 0;
     sb->files[2].parent = 0;
     
     strncpy(sb->files[3].name, "System32", VFS_NAME_MAX - 1);
+    sb->files[3].name[VFS_NAME_MAX - 1] = 0;
     sb->files[3].type = VFS_DIR;
     sb->files[3].used = 1;
     sb->files[3].size = 0;

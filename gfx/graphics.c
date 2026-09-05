@@ -4,6 +4,49 @@
 #include <kstdio.h>
 #include <heap.h>
 
+/* BMP header structures */
+struct bmp_file_header {
+    u16 signature;
+    u32 file_size;
+    u16 reserved1;
+    u16 reserved2;
+    u32 data_offset;
+};
+
+struct bmp_info_header {
+    u32 header_size;
+    i32 width;
+    i32 height;
+    u16 planes;
+    u16 bpp;
+    u32 compression;
+    u32 image_size;
+    i32 x_pixels_per_meter;
+    i32 y_pixels_per_meter;
+    u32 colors_used;
+    u32 colors_important;
+};
+
+/* Static storage for loaded BMP */
+static u8 *bmp_data = NULL;
+static i32 bmp_width = 0;
+static i32 bmp_height = 0;
+static u32 bmp_bpp = 0;
+
+/* Static storage for loaded PNG */
+static u8 *png_data = NULL;
+static i32 png_width = 0;
+static i32 png_height = 0;
+static u32 png_bpp = 0;
+
+/* Wallpaper system */
+static bool wallpaper_loaded = false;
+static u8 *wallpaper_data = NULL;
+static i32 wallpaper_width = 0;
+static i32 wallpaper_height = 0;
+static u32 wallpaper_bpp = 0;
+static enum { WALLPAPER_NONE, WALLPAPER_BMP, WALLPAPER_PNG } wallpaper_type = WALLPAPER_NONE;
+
 /*
  * Renderer notes
  * --------------
@@ -588,4 +631,295 @@ void gfx_flip_damaged(void) {
         if (!damage[i].alive) continue;
         flip_one(damage[i].x, damage[i].y, damage[i].w, damage[i].h);
     }
+}
+
+/* --------------------------------------------------------------------------
+ * PNG image loading (basic implementation)
+ *
+ * Simple PNG loader for basic 24-bit and 32-bit PNG files.
+ * This is a simplified implementation for kernel-space use.
+ * --------------------------------------------------------------------------
+ */
+
+bool gfx_load_png(const u8 *data, u32 size) {
+    /* PNG signature check */
+    if (size < 8 || data[0] != 0x89 || data[1] != 0x50 || data[2] != 0x4E || 
+        data[3] != 0x47 || data[4] != 0x0D || data[5] != 0x0A || data[6] != 0x1A || data[7] != 0x0A) {
+        kprintf("gfx_load_png: invalid PNG signature\n");
+        return false;
+    }
+    
+    /* For now, we'll implement a stub that returns false.
+     * Full PNG decoding is complex and requires zlib decompression.
+     * For a kernel implementation, we'd need:
+     * 1. Chunk parsing (IHDR, IDAT, IEND)
+     * 2. zlib decompression
+     * 3. PNG filtering
+     * 4. Color format conversion
+     */
+    kprintf("gfx_load_png: PNG support not fully implemented yet\n");
+    return false;
+}
+
+void gfx_draw_png(i32 x, i32 y) {
+    if (!png_data || !ready) {
+        return;
+    }
+    /* Stub for PNG drawing */
+    kprintf("gfx_draw_png: PNG drawing not implemented\n");
+}
+
+/* --------------------------------------------------------------------------
+ * Wallpaper system
+ *
+ * Loads and displays wallpaper images from the filesystem.
+ * Searches in /defaultsys/wallpaper/ for .jpg or .png files.
+ * --------------------------------------------------------------------------
+ */
+
+bool gfx_load_wallpaper(const char *path) {
+    /* This would integrate with the filesystem (CFS/VFS)
+     * For now, we'll implement a stub that could be extended
+     * once the filesystem is more developed.
+     */
+    kprintf("gfx_load_wallpaper: loading from %s (not implemented yet)\n", path);
+    return false;
+}
+
+void gfx_draw_wallpaper(void) {
+    if (!wallpaper_loaded || !wallpaper_data || !ready) {
+        /* Fall back to gradient wallpaper */
+        gfx_set_gradient_wallpaper(COLOR_RGB(19, 32, 54), COLOR_RGB(45, 60, 85));
+        return;
+    }
+    
+    /* Draw the loaded wallpaper scaled to screen */
+    i32 screen_w = (i32)gfx_width();
+    i32 screen_h = (i32)gfx_height();
+    
+    /* Simple stretch blit (could be improved with better scaling) */
+    for (i32 y = 0; y < screen_h; y++) {
+        for (i32 x = 0; x < screen_w; x++) {
+            /* Calculate source position (simple nearest-neighbor scaling) */
+            i32 src_x = (x * wallpaper_width) / screen_w;
+            i32 src_y = (y * wallpaper_height) / screen_h;
+            
+            if (src_x < wallpaper_width && src_y < wallpaper_height) {
+                u32 pixel;
+                if (wallpaper_type == WALLPAPER_BMP) {
+                    u32 idx = src_y * (wallpaper_width * 4) + src_x * 4;
+                    pixel = ((u32)wallpaper_data[idx + 0] << 16) |
+                           ((u32)wallpaper_data[idx + 1] << 8) |
+                           ((u32)wallpaper_data[idx + 2]);
+                } else {
+                    pixel = COLOR_RGB(19, 32, 54); /* Fallback */
+                }
+                gfx_putpixel(x, y, pixel);
+            }
+        }
+    }
+}
+
+/* --------------------------------------------------------------------------
+ * BMP image loading
+ *
+ * Simple BMP loader for 24-bit and 32-bit uncompressed BMP files.
+ * Supports basic BMP files that can be used as wallpapers.
+ * --------------------------------------------------------------------------
+ */
+
+bool gfx_load_bmp(const u8 *data, u32 size) {
+    struct bmp_file_header *file_header;
+    struct bmp_info_header *info_header;
+    u32 row_size;
+    i32 y, x;
+    
+    if (!data || size < sizeof(struct bmp_file_header) + sizeof(struct bmp_info_header)) {
+        kprintf("gfx_load_bmp: file too small\n");
+        return false;
+    }
+    
+    file_header = (struct bmp_file_header *)data;
+    if (file_header->signature != 0x4D42) { /* "BM" */
+        kprintf("gfx_load_bmp: invalid signature %x\n", file_header->signature);
+        return false;
+    }
+    
+    info_header = (struct bmp_info_header *)(data + sizeof(struct bmp_file_header));
+    if (info_header->header_size != 40) {
+        kprintf("gfx_load_bmp: unsupported header size %u\n", info_header->header_size);
+        return false;
+    }
+    
+    if (info_header->compression != 0) {
+        kprintf("gfx_load_bmp: compressed BMP not supported\n");
+        return false;
+    }
+    
+    if (info_header->bpp != 24 && info_header->bpp != 32) {
+        kprintf("gfx_load_bmp: unsupported bpp %u\n", info_header->bpp);
+        return false;
+    }
+    
+    if (info_header->width <= 0 || info_header->height <= 0) {
+        kprintf("gfx_load_bmp: invalid dimensions %dx%d\n", info_header->width, info_header->height);
+        return false;
+    }
+    
+    /* Free previous BMP data if any */
+    if (bmp_data) {
+        kfree(bmp_data);
+        bmp_data = NULL;
+    }
+    
+    bmp_width = info_header->width;
+    bmp_height = info_header->height;
+    bmp_bpp = info_header->bpp;
+    
+    /* Calculate row size (BMP rows are padded to 4-byte boundaries) */
+    row_size = ((bmp_width * bmp_bpp + 31) / 32) * 4;
+    
+    /* Allocate memory for the BMP data */
+    bmp_data = kmalloc(row_size * bmp_height);
+    if (!bmp_data) {
+        kprintf("gfx_load_bmp: allocation failed\n");
+        return false;
+    }
+    
+    /* Copy pixel data (BMP stores bottom-to-top) */
+    const u8 *src = data + file_header->data_offset;
+    u8 *dst = bmp_data;
+    
+    for (y = 0; y < bmp_height; y++) {
+        u32 src_y = (bmp_height - 1 - y); /* Flip vertically */
+        const u8 *src_row = src + src_y * row_size;
+        
+        for (x = 0; x < bmp_width; x++) {
+            u32 src_idx = x * (bmp_bpp / 8);
+            u32 dst_idx = y * row_size + x * 4; /* Always store as 32-bit */
+            
+            if (bmp_bpp == 24) {
+                /* BGR to RGB */
+                dst[dst_idx + 0] = src_row[src_idx + 2]; /* R */
+                dst[dst_idx + 1] = src_row[src_idx + 1]; /* G */
+                dst[dst_idx + 2] = src_row[src_idx + 0]; /* B */
+                dst[dst_idx + 3] = 0xFF; /* Alpha */
+            } else {
+                /* BGRA to RGBA */
+                dst[dst_idx + 0] = src_row[src_idx + 2]; /* R */
+                dst[dst_idx + 1] = src_row[src_idx + 1]; /* G */
+                dst[dst_idx + 2] = src_row[src_idx + 0]; /* B */
+                dst[dst_idx + 3] = src_row[src_idx + 3]; /* A */
+            }
+        }
+    }
+    
+    kprintf("gfx_load_bmp: loaded %dx%d %u-bpp BMP\n", bmp_width, bmp_height, bmp_bpp);
+    return true;
+}
+
+void gfx_draw_bmp(i32 x, i32 y) {
+    i32 draw_x, draw_y;
+    i32 draw_w, draw_h;
+    u32 row_size;
+    
+    if (!bmp_data || !ready) {
+        return;
+    }
+    
+    /* Calculate drawing area (clip to screen) */
+    draw_x = x;
+    draw_y = y;
+    draw_w = bmp_width;
+    draw_h = bmp_height;
+    
+    if (draw_x < 0) {
+        draw_w += draw_x;
+        draw_x = 0;
+    }
+    if (draw_y < 0) {
+        draw_h += draw_y;
+        draw_y = 0;
+    }
+    if (draw_x + draw_w > (i32)width) {
+        draw_w = (i32)width - draw_x;
+    }
+    if (draw_y + draw_h > (i32)height) {
+        draw_h = (i32)height - draw_y;
+    }
+    
+    if (draw_w <= 0 || draw_h <= 0) {
+        return;
+    }
+    
+    row_size = bmp_width * 4; /* Stored as 32-bit */
+    
+    /* Draw the BMP */
+    for (i32 py = 0; py < draw_h; py++) {
+        for (i32 px = 0; px < draw_w; px++) {
+            i32 src_x = draw_x - x + px;
+            i32 src_y = draw_y - y + py;
+            u32 src_idx = src_y * row_size + src_x * 4;
+            u32 pixel = ((u32)bmp_data[src_idx + 0] << 16) |
+                       ((u32)bmp_data[src_idx + 1] << 8) |
+                       ((u32)bmp_data[src_idx + 2]);
+            gfx_putpixel(draw_x + px, draw_y + py, pixel);
+        }
+    }
+    
+    /* Mark the drawn area as damaged */
+    gfx_damage_add(draw_x, draw_y, draw_w, draw_h);
+}
+
+/* --------------------------------------------------------------------------
+ * Gradient wallpaper generation
+ *
+ * Creates a gradient background using two colors. This provides a nice
+ * visual alternative to loading image files, which are complex to decode
+ * in kernel space.
+ * --------------------------------------------------------------------------
+ */
+
+void gfx_set_gradient_wallpaper(u32 color1, u32 color2) {
+    u32 y;
+    if (!ready) {
+        return;
+    }
+    
+    for (y = 0; y < height; y++) {
+        u32 r1, g1, b1, r2, g2, b2;
+        u32 r, g, b;
+        u32 pixel;
+        u32 t = (y * 256) / height; /* Fixed-point 0-255 */
+        
+        r1 = (color1 >> 16) & 0xFF;
+        g1 = (color1 >> 8) & 0xFF;
+        b1 = color1 & 0xFF;
+        
+        r2 = (color2 >> 16) & 0xFF;
+        g2 = (color2 >> 8) & 0xFF;
+        b2 = color2 & 0xFF;
+        
+        r = r1 + ((r2 - r1) * t) / 256;
+        g = g1 + ((g2 - g1) * t) / 256;
+        b = b1 + ((b2 - b1) * t) / 256;
+        
+        pixel = COLOR_RGB(r, g, b);
+        
+        if (bpp == 32 && (pitch == width * 4) &&
+            red_pos == 16 && green_pos == 8 && blue_pos == 0) {
+            u32 *row = (u32 *)(backbuffer + y * pitch);
+            u32 packed = pack(pixel);
+            for (u32 x = 0; x < width; x++) {
+                row[x] = packed;
+            }
+        } else {
+            for (u32 x = 0; x < width; x++) {
+                plot((i32)x, (i32)y, pixel);
+            }
+        }
+    }
+    
+    /* Full screen damage */
+    gfx_damage_add(0, 0, (i32)width, (i32)height);
 }

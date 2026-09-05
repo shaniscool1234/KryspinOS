@@ -32,4 +32,19 @@ void gfx_damage_add_window(i32 x, i32 y, i32 w, i32 h);
 void gfx_flip_damaged(void);   /* Flip only the union of damage rects */
 bool gfx_has_damage(void);
 
+/* ----- BMP image loading ----- */
+bool gfx_load_bmp(const u8 *data, u32 size);
+void gfx_draw_bmp(i32 x, i32 y);
+
+/* ----- PNG image loading ----- */
+bool gfx_load_png(const u8 *data, u32 size);
+void gfx_draw_png(i32 x, i32 y);
+
+/* ----- Wallpaper system ----- */
+bool gfx_load_wallpaper(const char *path);
+void gfx_draw_wallpaper(void);
+
+/* ----- Wallpaper generation ----- */
+void gfx_set_gradient_wallpaper(u32 color1, u32 color2);
+
 #endif

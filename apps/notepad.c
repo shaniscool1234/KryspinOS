@@ -21,6 +21,7 @@ static void np_save(struct notepad_state *st) {
     int fd = vfs_fopen(st->path, "w");
     if (fd < 0) {
         strncpy(st->status, "Save failed", sizeof(st->status) - 1);
+        st->status[sizeof(st->status) - 1] = 0;
         return;
     }
     if (st->len) {
@@ -28,11 +29,16 @@ static void np_save(struct notepad_state *st) {
     }
     vfs_fclose(fd);
     strncpy(st->status, "Saved", sizeof(st->status) - 1);
+    st->status[sizeof(st->status) - 1] = 0;
 }
 
 static void notepad_paint(struct window *w) {
     struct notepad_state *st = (struct notepad_state *)w->data;
     i32 x, y, i;
+    
+    /* Clear the window content area first to prevent artifacts */
+    gfx_rect(w->x, w->y + WM_TITLE_H, w->w, w->h - WM_TITLE_H, COLOR_RGB(255, 255, 255));
+    
     gfx_rect(w->x + 8, w->y + WM_TITLE_H + 4, 48, 14, COLOR_RGB(56, 132, 220));
     gfx_text_transparent(w->x + 16, w->y + WM_TITLE_H + 7, "Save", COLOR_RGB(255, 255, 255));
     gfx_text_transparent(w->x + 64, w->y + WM_TITLE_H + 7, st->path, COLOR_RGB(40, 50, 70));
@@ -102,8 +108,17 @@ static void notepad_click(struct window *w, i32 lx, i32 ly) {
 void notepad_setup(struct window *w, const char *path) {
     struct notepad_state *st = kcalloc(1, sizeof(*st));
     int fd;
+    if (!st) {
+        return; /* Allocation failed */
+    }
     st->buf = kcalloc(1, NP_CAP);
+    if (!st->buf) {
+        /* Allocation failed - clean up and return */
+        kfree(st);
+        return;
+    }
     strncpy(st->path, path ? path : "untitled.txt", VFS_NAME_MAX - 1);
+    st->path[VFS_NAME_MAX - 1] = 0;
     fd = vfs_fopen(st->path, "r");
     if (fd >= 0) {
         int n = vfs_fread(fd, st->buf, NP_CAP - 1);
@@ -118,6 +133,7 @@ void notepad_setup(struct window *w, const char *path) {
     w->key = notepad_key;
     w->click = notepad_click;
     strncpy(w->title, "Notepad", sizeof(w->title) - 1);
+    w->title[sizeof(w->title) - 1] = 0;
     active_np = st;
 }
 

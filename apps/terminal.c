@@ -214,7 +214,8 @@ static void term_cd(struct terminal_state *st, const char *path) {
             }
         }
     } else if (strcmp(path, "/") == 0) {
-        strcpy(st->current_dir, "/");
+        strncpy(st->current_dir, "/", VFS_NAME_MAX - 1);
+        st->current_dir[VFS_NAME_MAX - 1] = 0;
     } else if (path[0] == '/') {
         /* Absolute path */
         strncpy(new_path, path, sizeof(new_path) - 1);
@@ -235,7 +236,8 @@ static void term_cd(struct terminal_state *st, const char *path) {
         }
     } else {
         /* Relative path */
-        strcpy(new_path, st->current_dir);
+        strncpy(new_path, st->current_dir, sizeof(new_path) - 1);
+        new_path[sizeof(new_path) - 1] = 0;
         if (strcmp(st->current_dir, "/") != 0) {
             strcat(new_path, "/");
         }
@@ -268,7 +270,8 @@ static void term_mkdir(struct terminal_state *st, const char *name) {
         return;
     }
     if (name[0] != '/') {
-        strcpy(full_path, st->current_dir);
+        strncpy(full_path, st->current_dir, sizeof(full_path) - 1);
+        full_path[sizeof(full_path) - 1] = 0;
         if (strcmp(st->current_dir, "/") != 0) {
             strcat(full_path, "/");
         }
@@ -293,7 +296,8 @@ static void term_touch(struct terminal_state *st, const char *name) {
         return;
     }
     if (name[0] != '/') {
-        strcpy(full_path, st->current_dir);
+        strncpy(full_path, st->current_dir, sizeof(full_path) - 1);
+        full_path[sizeof(full_path) - 1] = 0;
         if (strcmp(st->current_dir, "/") != 0) {
             strcat(full_path, "/");
         }
@@ -318,7 +322,8 @@ static void term_rm(struct terminal_state *st, const char *name) {
         return;
     }
     if (name[0] != '/') {
-        strcpy(full_path, st->current_dir);
+        strncpy(full_path, st->current_dir, sizeof(full_path) - 1);
+        full_path[sizeof(full_path) - 1] = 0;
         if (strcmp(st->current_dir, "/") != 0) {
             strcat(full_path, "/");
         }
@@ -634,7 +639,8 @@ static void term_execute(struct terminal_state *st) {
     int argc;
     const char *cmd;
     
-    strcpy(cmd_copy, st->input);
+    strncpy(cmd_copy, st->input, sizeof(cmd_copy) - 1);
+    cmd_copy[sizeof(cmd_copy) - 1] = 0;
     trim_whitespace(cmd_copy);
     cmd = cmd_copy;
     
@@ -770,7 +776,8 @@ static void terminal_paint(struct window *w) {
     }
     if (y <= bottom) {
         /* Show current directory in prompt */
-        strcpy(prompt, st->current_dir);
+        strncpy(prompt, st->current_dir, sizeof(prompt) - 1);
+        prompt[sizeof(prompt) - 1] = 0;
         strcat(prompt, " $ ");
         gfx_text_transparent(x, y, prompt, COLOR_RGB(110, 190, 255));
         gfx_text_transparent(x + strlen(prompt) * 8, y, st->input, COLOR_RGB(236, 238, 242));
@@ -801,11 +808,15 @@ static void terminal_key(struct window *w, char c) {
 
 void terminal_setup(struct window *w) {
     struct terminal_state *st = kcalloc(1, sizeof(*st));
+    if (!st) {
+        return; /* Allocation failed */
+    }
     w->data = st;
     w->paint = terminal_paint;
     w->key = terminal_key;
     w->click = NULL;
-    strcpy(st->current_dir, "/");
+    strncpy(st->current_dir, "/", VFS_NAME_MAX - 1);
+    st->current_dir[VFS_NAME_MAX - 1] = 0;
     st->history_count = 0;
     st->history_index = 0;
     term_line(st, "KryspinOS Terminal v2.0");
