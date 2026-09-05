@@ -18,7 +18,7 @@
 
 void kmain(u32 magic, struct multiboot_info *mb) {
     vga_init();
-    kprintf("Welcome to cursorOS!\n");
+    kprintf("Welcome to KryspinOS!\n");
 
     if (magic != MULTIBOOT_MAGIC) {
         kprintf("Invalid multiboot magic: %x\n", magic);
@@ -50,8 +50,8 @@ void kmain(u32 magic, struct multiboot_info *mb) {
 
     if (gfx_ready()) {
         gfx_fill(COLOR_RGB(24, 48, 80));
-        gfx_text(40, 40, "Welcome to cursorOS!", COLOR_RGB(255, 255, 255), 0xFFFFFFFF);
-        wm_init();
+        gfx_text(40, 40, "Welcome to KryspinOS!", COLOR_RGB(255, 255, 255), 0xFFFFFFFF);
+        wm_init(mb);
         for (;;) {
             wm_update();
             __asm__ volatile("hlt");

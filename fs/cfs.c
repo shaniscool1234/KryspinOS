@@ -54,10 +54,10 @@ static void format_new(void) {
     sb->files[0].size = 0;
     sb->files[0].parent = 0;
     seed_file(1, "readme.txt",
-              "Welcome to cursorOS!\n"
+              "Welcome to KryspinOS!\n"
               "This is a ramdisk CursorFS volume.\n"
               "Open files in Notepad or create new ones.\n");
-    seed_file(2, "hello.txt", "Hello from cursorOS.\n");
+    seed_file(2, "hello.txt", "Hello from KryspinOS.\n");
     sb->file_count = 3;
 }
 

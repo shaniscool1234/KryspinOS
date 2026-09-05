@@ -1,4 +1,4 @@
-; cursorOS Multiboot-1 entry
+; KryspinOS Multiboot-1 entry
 ; Flags: page-align modules, pass memory map, request linear framebuffer.
 
 MBALIGN     equ 1 << 0

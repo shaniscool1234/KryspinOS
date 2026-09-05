@@ -9,6 +9,9 @@ static u32 width;
 static u32 height;
 static u32 bpp;
 static bool ready;
+static u8 red_pos, red_size;
+static u8 green_pos, green_size;
+static u8 blue_pos, blue_size;
 
 void gfx_init(struct multiboot_info *mb) {
     ready = false;
@@ -26,9 +29,9 @@ void gfx_init(struct multiboot_info *mb) {
         kprintf("gfx: unsupported bpp=%u (need >=24)\n", mb->framebuffer_bpp);
         return;
     }
-    if (mb->framebuffer_type != 0 && mb->framebuffer_type != 1) {
-        kprintf("gfx: unsupported fb type=%u\n", mb->framebuffer_type);
-        return;
+    if (mb->framebuffer_type > 2) {
+        kprintf("gfx: unusual fb type=%u; using packed-pixel fallback\n",
+                mb->framebuffer_type);
     }
     if (mb->framebuffer_width == 0 || mb->framebuffer_height == 0 ||
         mb->framebuffer_pitch == 0 || mb->framebuffer_addr == 0) {
@@ -42,6 +45,38 @@ void gfx_init(struct multiboot_info *mb) {
     width = mb->framebuffer_width;
     height = mb->framebuffer_height;
     bpp = mb->framebuffer_bpp;
+    /*
+     * Multiboot type 0 is nominally indexed, but VirtualBox has been
+     * observed to report it for a packed 24/32-bit framebuffer. In that
+     * case color_info points at palette data, not RGB masks. Use the
+     * conventional BGRX layout instead of interpreting palette bytes as
+     * shift counts.
+     */
+    if (mb->framebuffer_type == 1) {
+        red_pos = mb->color_info[0];
+        red_size = mb->color_info[1];
+        green_pos = mb->color_info[2];
+        green_size = mb->color_info[3];
+        blue_pos = mb->color_info[4];
+        blue_size = mb->color_info[5];
+    } else {
+        red_pos = 16;
+        red_size = 8;
+        green_pos = 8;
+        green_size = 8;
+        blue_pos = 0;
+        blue_size = 8;
+    }
+    if (red_size > 8 || green_size > 8 || blue_size > 8 ||
+        red_pos + red_size > 32 || green_pos + green_size > 32 ||
+        blue_pos + blue_size > 32) {
+        red_pos = 16;
+        red_size = 8;
+        green_pos = 8;
+        green_size = 8;
+        blue_pos = 0;
+        blue_size = 8;
+    }
     ready = true;
     kprintf("gfx: %ux%ux%u pitch=%u fb=%p (type=%u)\n",
            width, height, bpp, pitch, fb, mb->framebuffer_type);
@@ -53,16 +88,23 @@ u32  gfx_height(void) { return height; }
 
 static void plot(i32 x, i32 y, u32 color) {
     u8 *p;
+    u32 pixel;
+    u32 r = (color >> 16) & 0xFF;
+    u32 g = (color >> 8) & 0xFF;
+    u32 b = color & 0xFF;
     if (!ready || x < 0 || y < 0 || (u32)x >= width || (u32)y >= height) {
         return;
     }
     p = fb + (u32)y * pitch + (u32)x * (bpp / 8);
+    pixel = ((r >> (8 - red_size)) << red_pos) |
+            ((g >> (8 - green_size)) << green_pos) |
+            ((b >> (8 - blue_size)) << blue_pos);
     if (bpp == 32) {
-        *(u32 *)p = color;
+        *(u32 *)p = pixel;
     } else {
-        p[0] = (u8)(color & 0xFF);
-        p[1] = (u8)((color >> 8) & 0xFF);
-        p[2] = (u8)((color >> 16) & 0xFF);
+        p[0] = (u8)(pixel & 0xFF);
+        p[1] = (u8)((pixel >> 8) & 0xFF);
+        p[2] = (u8)((pixel >> 16) & 0xFF);
     }
 }
 
@@ -86,7 +128,8 @@ void gfx_fill(u32 color) {
     if (!ready) {
         return;
     }
-    if (bpp == 32 && (pitch == width * 4)) {
+    if (bpp == 32 && (pitch == width * 4) &&
+        red_pos == 16 && green_pos == 8 && blue_pos == 0) {
         u32 *p = (u32 *)fb;
         u32 n = width * height;
         for (x = 0; x < n; x++) {

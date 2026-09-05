@@ -1,13 +1,16 @@
-# Cross-compiler toolchain (https://wiki.osdev.org/GCC_Cross-Compiler)
-CC      := i686-elf-gcc
+# Native compiler in 32-bit freestanding mode. The Replit environment provides
+# the required multilib support, so an external i686-elf cross compiler is not
+# needed to build the ISO here.
+CC      := gcc
 AS      := nasm
 GRUB    := grub-mkrescue
 
-CFLAGS  := -std=gnu99 -ffreestanding -O2 -Wall -Wextra -fno-exceptions \
+CFLAGS  := -m32 -march=i386 -mno-sse -mno-sse2 -mno-mmx -msoft-float \
+           -fno-tree-vectorize -std=gnu99 -ffreestanding -O2 -Wall -Wextra -fno-exceptions \
            -fno-stack-protector -fno-pic -nostdlib \
            -Iinclude
 ASFLAGS := -f elf32
-LDFLAGS := -T linker.ld -ffreestanding -O2 -nostdlib -lgcc
+LDFLAGS := -m32 -T linker.ld -ffreestanding -O2 -nostdlib -lgcc
 
 C_SOURCES := \
 	kernel/kernel.c \
@@ -17,6 +20,7 @@ C_SOURCES := \
 	drivers/keyboard.c \
 	drivers/mouse.c \
 	drivers/ata.c \
+	drivers/rtc.c \
 	cpu/gdt.c \
 	cpu/idt.c \
 	cpu/isr.c \
@@ -31,7 +35,10 @@ C_SOURCES := \
 	gfx/graphics.c \
 	gui/wm.c \
 	apps/explorer.c \
-	apps/notepad.c
+	apps/notepad.c \
+	apps/terminal.c \
+	apps/system.c \
+	apps/taskmgr.c
 
 ASM_SOURCES := \
 	boot/boot.asm \
@@ -39,7 +46,7 @@ ASM_SOURCES := \
 	cpu/isr.asm
 
 C_OBJS   := $(C_SOURCES:%.c=build/%.o)
-ASM_OBJS := $(ASM_SOURCES:%.asm=build/%.o)
+ASM_OBJS := build/boot/boot_asm.o build/cpu/gdt_flush_asm.o build/cpu/isr_asm.o
 OBJS     := $(ASM_OBJS) $(C_OBJS)
 
 .PHONY: all iso kernel clean dirs
@@ -54,7 +61,13 @@ dirs:
 build/%.o: %.c | dirs
 	$(CC) $(CFLAGS) -c $< -o $@
 
-build/%.o: %.asm | dirs
+build/boot/boot_asm.o: boot/boot.asm | dirs
+	$(AS) $(ASFLAGS) $< -o $@
+
+build/cpu/gdt_flush_asm.o: cpu/gdt_flush.asm | dirs
+	$(AS) $(ASFLAGS) $< -o $@
+
+build/cpu/isr_asm.o: cpu/isr.asm | dirs
 	$(AS) $(ASFLAGS) $< -o $@
 
 build/kernel.bin: $(OBJS) linker.ld | dirs
@@ -65,7 +78,7 @@ kernel: build/kernel.bin
 iso: build/kernel.bin grub/grub.cfg | dirs
 	cp build/kernel.bin build/iso/boot/kernel.bin
 	cp grub/grub.cfg build/iso/boot/grub/grub.cfg
-	$(GRUB) -o cursorOS.iso build/iso
+	$(GRUB) -o KryspinOS.iso build/iso
 
 clean:
-	rm -rf build cursorOS.iso
+	rm -rf build KryspinOS.iso

@@ -5,7 +5,7 @@
 
 #define WM_MAX_WINDOWS 8
 #define WM_TITLE_H     22
-#define WM_TASKBAR_H   28
+#define WM_TASKBAR_H   46
 
 struct window {
     bool used;

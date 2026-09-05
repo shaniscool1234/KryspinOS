@@ -33,9 +33,15 @@ static void explorer_paint(struct window *w) {
         }
         line[n] = 0;
         gfx_rect(w->x + 10, y, w->w - 20, 18, COLOR_RGB(220, 226, 234));
-        gfx_text(w->x + 16, y + 5, st->ents[i].type == VFS_DIR ? "[DIR]" : "[FILE]",
-                 COLOR_RGB(40, 90, 160), 0xFFFFFFFF);
-        gfx_text(w->x + 64, y + 5, line, COLOR_RGB(20, 24, 32), 0xFFFFFFFF);
+        if (st->ents[i].type == VFS_DIR) {
+            gfx_rect(w->x + 16, y + 5, 13, 9, COLOR_RGB(247, 188, 67));
+            gfx_rect(w->x + 18, y + 3, 6, 3, COLOR_RGB(247, 188, 67));
+        } else {
+            gfx_rect(w->x + 18, y + 3, 10, 13, COLOR_RGB(112, 184, 248));
+            gfx_rect(w->x + 20, y + 6, 6, 1, COLOR_RGB(255, 255, 255));
+            gfx_rect(w->x + 20, y + 9, 6, 1, COLOR_RGB(255, 255, 255));
+        }
+        gfx_text(w->x + 38, y + 5, line, COLOR_RGB(20, 24, 32), 0xFFFFFFFF);
         y += 22;
         if (y > w->y + w->h - 20) {
             break;

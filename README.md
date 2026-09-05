@@ -1,9 +1,9 @@
 # KryspinOS
 
 A small 32-bit x86 hobby operating system with a graphical desktop, a window
-manager, a custom filesystem (CFS) and a couple of built-in apps (Notepad,
-File Explorer). The kernel identifies itself on boot as **cursorOS** — the
-legacy name stuck in the code.
+manager, a custom filesystem (CFS) and built-in apps (Notepad, File Explorer,
+Terminal, and System Information). The kernel identifies itself on boot as
+**KryspinOS**.
 
 This document covers what KryspinOS is, how it's wired together, how to
 build it, and how to run it (QEMU and VirtualBox).
@@ -54,9 +54,10 @@ build it, and how to run it (QEMU and VirtualBox).
 - **Linear framebuffer graphics**: 24/32-bpp primitives, 8×8 bitmap font,
   rectangles, text.
 - **Window manager**: draggable windows, close button, focus by Z-order,
-  taskbar with app launchers and a live clock (PIT @ 100 Hz).
-- **Two built-in apps**: Notepad (4 KiB buffer, save/open via CFS) and
-  File Explorer (lists CFS root, opens files in Notepad).
+  searchable taskbar with pinned apps and a live RTC clock/date.
+- **Built-in apps**: Notepad (4 KiB buffer, save/open via CFS), File Explorer
+  (lists CFS root, opens files in Notepad), Terminal (basic shell commands),
+  and System Information (hardware and framebuffer details).
 
 There is no userspace, no paging beyond 32 MiB + the framebuffer, no
 ACPI, no APIC, no PCI enumeration, and no networking — it's a hobby
@@ -240,8 +241,8 @@ sti
     or `click(lx, ly)`).
   - The classic 12×19 arrow cursor is drawn by saving the underlying
     pixels, then compositing a 2-tone sprite.
-  - Default desktop: blue background with a "cursorOS" header, a
-    taskbar with "Explorer" / "Notepad" launchers and a live clock.
+  - Default desktop: branded KryspinOS workspace with search, pinned
+    Explorer/Notepad/Terminal/System launchers, and live time/date.
 
 ### Apps
 
@@ -251,15 +252,21 @@ sti
 - **File Explorer** (`apps/explorer.c`): lists CFS root with
   `vfs_list`, refresh button re-runs the listing, click on `[FILE]` row
   calls `wm_open_notepad(filename)`.
+- **Terminal** (`apps/terminal.c`): accepts `help`, `ls`, `cat`, `date`,
+  `hardware`, `clear`, `about`, and `echo` commands.
+- **System Information** (`apps/system.c`): shows the processor mode,
+  GRUB-reported memory, framebuffer dimensions, and storage mode.
 
 ---
 
 ## Building
 
-KryspinOS is built with an i686-ELF cross toolchain (so the kernel
-doesn't depend on the host's libc) plus `nasm` for assembly and
-`grub-mkrescue` (from `grub-common` / `grub2-common`) to produce the
-bootable ISO.
+KryspinOS is built in freestanding 32-bit mode, plus `nasm` for assembly
+and `grub-mkrescue` (from `grub-common` / `grub2-common`) to produce the
+bootable ISO. On Replit, the native compiler's multilib support is used,
+so an i686-ELF cross compiler is not required.
+The Makefile also disables SSE/MMX code generation because the kernel does
+not enable those CPU extensions before entering protected-mode C code.
 
 ### Toolchain (Linux)
 
@@ -269,14 +276,10 @@ sudo apt install \
     libmpc-dev texinfo wget nasm xorriso grub-pc-bin qemu-system-x86
 ```
 
-Then build a GCC cross compiler targeting `i686-elf`. The classic recipe
-is at <https://wiki.osdev.org/GCC_Cross-Compiler>; you need
-`binutils` (for `ld`, `objcopy`) and `gcc` built for
-`--target=i686-elf`. Put the toolchain's `bin/` directory on your
-`PATH` (the Makefile expects `i686-elf-gcc`).
-
-If you already have a working i686 toolchain (e.g. via the OSDev
-tutorial or `build-cross.sh` script), skip ahead to the next section.
+For a standard Linux installation, the classic cross-compiler recipe is
+at <https://wiki.osdev.org/GCC_Cross-Compiler>. Alternatively, on a
+Replit environment with native multilib support installed, skip the
+cross-compiler setup and run the build directly.
 
 ### Toolchain (Windows / MSYS2)
 
@@ -307,16 +310,16 @@ That's it. The Makefile:
 2. Links them with `linker.ld` into `build/kernel.bin` (ELF32, loaded
    at `0x00100000`).
 3. Copies the kernel and `grub/grub.cfg` into `build/iso/boot/...`.
-4. Runs `grub-mkrescue -o cursorOS.iso build/iso`.
+4. Runs `grub-mkrescue -o KryspinOS.iso build/iso`.
 
-The final artifact is **`cursorOS.iso`** at the project root. Boot it
+The final artifact is **`KryspinOS.iso`** at the project root. Boot it
 with any BIOS-mode multiboot loader (GRUB, qemu-direct, etc.).
 
 You can also stop at intermediate steps:
 
 ```sh
 make kernel   # produces build/kernel.bin
-make iso      # produces cursorOS.iso
+make iso      # produces KryspinOS.iso
 ```
 
 ### Cleaning
@@ -325,7 +328,7 @@ make iso      # produces cursorOS.iso
 make clean
 ```
 
-Removes `build/` and `cursorOS.iso`.
+Removes `build/` and `KryspinOS.iso`.
 
 ---
 
@@ -334,7 +337,7 @@ Removes `build/` and `cursorOS.iso`.
 ### QEMU
 
 ```sh
-qemu-system-i386 -cdrom cursorOS.iso -m 512 -serial stdio
+qemu-system-i386 -cdrom KryspinOS.iso -m 512 -serial stdio
 ```
 
 `-m 512` is plenty. For a faster boot pass `-no-reboot -no-shutdown`.
@@ -353,14 +356,14 @@ natively — most distros' QEMU doesn't, so prefer the ISO path.
 
 1. **Create a new VM** (Type: Other / Version: Other/Unknown (32-bit)).
    Give it at least 512 MB of RAM.
-2. **Storage**: attach `cursorOS.iso` to the IDE controller as the
+2. **Storage**: attach `KryspinOS.iso` to the IDE controller as the
    optical drive.
 3. **Display**: set Video Memory to 16 MB or more. Switch the
    graphics controller to **VBoxVGA** if you have the option — VBoxSVGA
    and VMSVGA sometimes don't honor the multiboot header's requested
    mode.
 4. Boot the VM. GRUB should pick 1024×768×32 and you should see the
-   blue desktop with the cursorOS header.
+   KryspinOS desktop with the taskbar and pinned apps.
 
 If the screen stays black, see [Troubleshooting](#troubleshooting).
 
@@ -397,6 +400,12 @@ There are three common culprits; the kernel prints diagnostics for each.
    sets `gfxpayload=1024x768x32,1024x768x24,800x600x32,auto` to force
    a sane default — make sure you're booting from the ISO produced by
    `make`, not a stale one.
+
+4. **The VM reports "Guru Meditation" immediately.** This usually means
+   the kernel faulted before drawing. Rebuild with the supplied Makefile;
+   it disables SSE/MMX instructions that a native compiler may otherwise
+   emit before the kernel has enabled those CPU extensions. In VirtualBox,
+   keep EFI disabled and use a 32-bit BIOS VM.
 
 4. **Diagnostic breadcrumbs.** The VGA console always prints the
    multiboot framebuffer fields when graphics fails:
