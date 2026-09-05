@@ -18,5 +18,7 @@ void gfx_rect_border(i32 x, i32 y, i32 w, i32 h, u32 color);
 void gfx_char(i32 x, i32 y, char c, u32 fg, u32 bg);
 void gfx_text(i32 x, i32 y, const char *s, u32 fg, u32 bg);
 void gfx_text_transparent(i32 x, i32 y, const char *s, u32 fg);
+void gfx_flip(void);  /* Double buffering: flip back buffer to screen */
+void gfx_clear_dirty(void);  /* Clear dirty rectangles for partial updates */
 
 #endif

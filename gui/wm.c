@@ -69,13 +69,15 @@ static const u8 cursor_sprite[CURSOR_H][CURSOR_W] = {
 static void pit_irq(struct regs *r) {
     (void)r;
     ticks++;
-    if ((ticks % 10) == 0) {
+    /* Update more frequently for smoother rendering (every 5 ticks instead of 10) */
+    if ((ticks % 5) == 0) {
         dirty = true;
     }
 }
 
 static void pit_init(void) {
-    u32 div = 1193180 / 100;
+    /* Higher frequency (200 Hz instead of 100 Hz) for smoother rendering */
+    u32 div = 1193180 / 200;
     outb(0x43, 0x36);
     outb(0x40, (u8)(div & 0xFF));
     outb(0x40, (u8)((div >> 8) & 0xFF));
@@ -280,9 +282,12 @@ static void cursor_restore(void) {
     if (!cursor_saved) {
         return;
     }
-    for (j = 0; j < CURSOR_H; j++) {
-        for (i = 0; i < CURSOR_W; i++) {
-            gfx_putpixel(cursor_sx + i, cursor_sy + j, cursor_save[j * CURSOR_W + i]);
+    /* Restore only if cursor position is valid */
+    if (cursor_sx >= 0 && cursor_sy >= 0) {
+        for (j = 0; j < CURSOR_H; j++) {
+            for (i = 0; i < CURSOR_W; i++) {
+                gfx_putpixel(cursor_sx + i, cursor_sy + j, cursor_save[j * CURSOR_W + i]);
+            }
         }
     }
     cursor_saved = false;
@@ -290,15 +295,28 @@ static void cursor_restore(void) {
 
 static void cursor_draw(i32 x, i32 y) {
     i32 i, j;
+    /* Clamp cursor to screen bounds to prevent black spots */
+    i32 screen_w = (i32)gfx_width();
+    i32 screen_h = (i32)gfx_height();
+    
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x + CURSOR_W > screen_w) x = screen_w - CURSOR_W;
+    if (y + CURSOR_H > screen_h) y = screen_h - CURSOR_H;
+    
     cursor_restore();
     cursor_sx = x;
     cursor_sy = y;
+    
+    /* Save background from backbuffer */
     for (j = 0; j < CURSOR_H; j++) {
         for (i = 0; i < CURSOR_W; i++) {
             cursor_save[j * CURSOR_W + i] = gfx_getpixel(x + i, y + j);
         }
     }
     cursor_saved = true;
+    
+    /* Draw cursor sprite */
     for (j = 0; j < CURSOR_H; j++) {
         for (i = 0; i < CURSOR_W; i++) {
             u8 p = cursor_sprite[j][i];
@@ -439,7 +457,7 @@ static void draw_startup(void) {
     gfx_text_transparent(width / 2 - 60, height / 2 - 72, "KryspinOS", COL_WHITE);
     gfx_text_transparent(width / 2 - 76, height / 2 - 48, "Starting your desktop...", COLOR_RGB(169, 198, 226));
     gfx_rect(width / 2 - 150, height / 2 - 15, 300, 12, COLOR_RGB(31, 49, 70));
-    gfx_rect(width / 2 - 150, height / 2 - 15, (i32)((ticks % 220) * 300 / 220), 12, COL_ACCENT);
+    gfx_rect(width / 2 - 150, height / 2 - 15, (i32)((ticks % 440) * 300 / 440), 12, COL_ACCENT);
     gfx_text_transparent(width / 2 - 92, height / 2 + 20, "32-bit protected mode", COLOR_RGB(137, 170, 203));
     gfx_text_transparent(width / 2 - 92, height / 2 + 36, "Memory: ", COLOR_RGB(137, 170, 203));
     gfx_text_transparent(width / 2 - 28, height / 2 + 36, mem, COL_WHITE);
@@ -502,7 +520,8 @@ void wm_update(void) {
     if (!startup_done) {
         while (keyboard_read(&ch)) {
         }
-        if (ticks < 220) {
+        /* Adjust for higher timer frequency (440 ticks instead of 220) */
+        if (ticks < 440) {
             if (dirty) {
                 draw_startup();
                 dirty = false;
@@ -653,8 +672,12 @@ void wm_update(void) {
         cursor_saved = false;
         draw_desktop();
         cursor_draw(m.x, m.y);
+        /* Flip backbuffer to screen for smooth rendering */
+        gfx_flip();
         dirty = false;
     } else if (m.moved) {
         cursor_draw(m.x, m.y);
+        /* Also flip on mouse movement for smooth cursor updates */
+        gfx_flip();
     }
 }

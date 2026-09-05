@@ -1,6 +1,7 @@
 #include <vfs.h>
 #include <cfs.h>
 #include <string.h>
+#include <kstdio.h>
 
 static struct file files[VFS_MAX_OPEN];
 
@@ -13,7 +14,14 @@ void vfs_init(void) {
 }
 
 int vfs_list(struct vfs_dirent *ents, int max) {
-    return cfs_list(ents, max);
+    /* List root directory by default */
+    return cfs_list(ents, max, 0);
+}
+
+int vfs_list_dir(struct vfs_dirent *ents, int max, const char *path) {
+    int parent_idx = cfs_resolve_path(path, 0);
+    if (parent_idx < 0) return -1;
+    return cfs_list(ents, max, parent_idx);
 }
 
 int vfs_create(const char *path) {
@@ -97,4 +105,41 @@ u32 vfs_fsize(int fd) {
         return 0;
     }
     return files[fd].size;
+}
+
+int vfs_fseek(int fd, u32 offset, int whence) {
+    if (fd < 0 || fd >= VFS_MAX_OPEN || !files[fd].used) {
+        return -1;
+    }
+    if (whence == SEEK_SET) {
+        files[fd].pos = offset;
+    } else if (whence == SEEK_CUR) {
+        files[fd].pos += offset;
+    } else if (whence == SEEK_END) {
+        files[fd].pos = files[fd].size + offset;
+    }
+    if (files[fd].pos > files[fd].size) {
+        files[fd].pos = files[fd].size;
+    }
+    return 0;
+}
+
+int vfs_delete(const char *path) {
+    int idx = cfs_resolve_path(path, 0);
+    if (idx < 0) {
+        return -1;
+    }
+    return cfs_delete(idx);
+}
+
+int vfs_resolve_path(const char *path) {
+    return cfs_resolve_path(path, 0);
+}
+
+u8 vfs_get_type(const char *path) {
+    int idx = cfs_resolve_path(path, 0);
+    if (idx < 0) {
+        return 0;
+    }
+    return cfs_type(idx);
 }

@@ -2,8 +2,10 @@
 #include <font.h>
 #include <string.h>
 #include <kstdio.h>
+#include <heap.h>
 
 static u8 *fb;
+static u8 *backbuffer;
 static u32 pitch;
 static u32 width;
 static u32 height;
@@ -16,6 +18,7 @@ static u8 blue_pos, blue_size;
 void gfx_init(struct multiboot_info *mb) {
     ready = false;
     fb = NULL;
+    backbuffer = NULL;
     if (!(mb->flags & MULTIBOOT_INFO_FRAMEBUFFER)) {
         kprintf("gfx: no framebuffer from GRUB (mb flags=%x)\n", mb->flags);
         return;
@@ -45,6 +48,17 @@ void gfx_init(struct multiboot_info *mb) {
     width = mb->framebuffer_width;
     height = mb->framebuffer_height;
     bpp = mb->framebuffer_bpp;
+    
+    /* Allocate back buffer for double buffering */
+    u32 backbuffer_size = pitch * height;
+    backbuffer = kmalloc(backbuffer_size);
+    if (!backbuffer) {
+        kprintf("gfx: failed to allocate back buffer, falling back to direct rendering\n");
+        /* Continue without backbuffer - will render directly to framebuffer */
+    } else {
+        memset(backbuffer, 0, backbuffer_size);
+    }
+    
     /*
      * Multiboot type 0 is nominally indexed, but VirtualBox has been
      * observed to report it for a packed 24/32-bit framebuffer. In that
@@ -78,8 +92,8 @@ void gfx_init(struct multiboot_info *mb) {
         blue_size = 8;
     }
     ready = true;
-    kprintf("gfx: %ux%ux%u pitch=%u fb=%p (type=%u)\n",
-           width, height, bpp, pitch, fb, mb->framebuffer_type);
+    kprintf("gfx: %ux%ux%u pitch=%u fb=%p backbuffer=%p (type=%u)\n",
+           width, height, bpp, pitch, fb, backbuffer, mb->framebuffer_type);
 }
 
 bool gfx_ready(void) { return ready; }
@@ -95,7 +109,12 @@ static void plot(i32 x, i32 y, u32 color) {
     if (!ready || x < 0 || y < 0 || (u32)x >= width || (u32)y >= height) {
         return;
     }
-    p = fb + (u32)y * pitch + (u32)x * (bpp / 8);
+    /* Write to backbuffer if available, otherwise directly to framebuffer */
+    if (backbuffer) {
+        p = backbuffer + (u32)y * pitch + (u32)x * (bpp / 8);
+    } else {
+        p = fb + (u32)y * pitch + (u32)x * (bpp / 8);
+    }
     pixel = ((r >> (8 - red_size)) << red_pos) |
             ((g >> (8 - green_size)) << green_pos) |
             ((b >> (8 - blue_size)) << blue_pos);
@@ -113,7 +132,12 @@ static u32 sample(i32 x, i32 y) {
     if (!ready || x < 0 || y < 0 || (u32)x >= width || (u32)y >= height) {
         return 0;
     }
-    p = fb + (u32)y * pitch + (u32)x * (bpp / 8);
+    /* Read from backbuffer if available, otherwise directly from framebuffer */
+    if (backbuffer) {
+        p = backbuffer + (u32)y * pitch + (u32)x * (bpp / 8);
+    } else {
+        p = fb + (u32)y * pitch + (u32)x * (bpp / 8);
+    }
     if (bpp == 32) {
         return *(u32 *)p;
     }
@@ -203,4 +227,20 @@ void gfx_text(i32 x, i32 y, const char *s, u32 fg, u32 bg) {
 
 void gfx_text_transparent(i32 x, i32 y, const char *s, u32 fg) {
     gfx_text(x, y, s, fg, 0xFFFFFFFF);
+}
+
+void gfx_flip(void) {
+    if (!ready) {
+        return;
+    }
+    /* Copy backbuffer to framebuffer for double buffering */
+    if (backbuffer) {
+        memcpy(fb, backbuffer, pitch * height);
+    }
+    /* If no backbuffer, rendering is already direct to framebuffer */
+}
+
+void gfx_clear_dirty(void) {
+    /* No-op for now - could be used for partial updates later */
+    (void)ready;
 }

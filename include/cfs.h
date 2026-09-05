@@ -28,7 +28,7 @@ struct cfs_super {
 } PACKED;
 
 void cfs_mount(void);
-int  cfs_list(struct vfs_dirent *ents, int max);
+int  cfs_list(struct vfs_dirent *ents, int max, int parent_idx);
 int  cfs_find(const char *path);
 int  cfs_create(const char *path, u8 type);
 int  cfs_read(int idx, u32 off, void *buf, u32 n);
@@ -36,5 +36,9 @@ int  cfs_write(int idx, u32 off, const void *buf, u32 n);
 u32  cfs_size(int idx);
 u8   cfs_type(int idx);
 void cfs_set_size(int idx, u32 size);
+int  cfs_resolve_path(const char *path, int current_parent);
+int  cfs_delete(int idx);
+int  cfs_set_parent(int idx, int new_parent);
+int  cfs_rename(int idx, const char *new_name);
 
 #endif

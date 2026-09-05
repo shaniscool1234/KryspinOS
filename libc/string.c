@@ -107,6 +107,17 @@ char *strcat(char *dst, const char *src) {
     return r;
 }
 
+char *strncat(char *dst, const char *src, size_t n) {
+    char *r = dst;
+    while (*dst) {
+        dst++;
+    }
+    while (n-- && (*dst++ = *src++)) {
+    }
+    *dst = '\0';
+    return r;
+}
+
 char *strchr(const char *s, int c) {
     char ch = (char)c;
     while (*s) {
@@ -118,5 +129,43 @@ char *strchr(const char *s, int c) {
     if (ch == '\0') {
         return (char *)s;
     }
+    return NULL;
+}
+
+char *strrchr(const char *s, int c) {
+    char ch = (char)c;
+    const char *last = NULL;
+    while (*s) {
+        if (*s == ch) {
+            last = s;
+        }
+        s++;
+    }
+    if (ch == '\0') {
+        return (char *)s;
+    }
+    return (char *)last;
+}
+
+char *strstr(const char *haystack, const char *needle) {
+    if (!*needle) {
+        return (char *)haystack;
+    }
+    
+    while (*haystack) {
+        const char *h = haystack;
+        const char *n = needle;
+        
+        while (*h && *n && *h == *n) {
+            h++;
+            n++;
+        }
+        
+        if (!*n) {
+            return (char *)haystack;
+        }
+        haystack++;
+    }
+    
     return NULL;
 }
