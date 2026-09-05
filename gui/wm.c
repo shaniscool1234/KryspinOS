@@ -66,21 +66,34 @@ static const u8 cursor_sprite[CURSOR_H][CURSOR_W] = {
     {0,0,0,0,0,0,0,1,1,0,0,0}
 };
 
+/*
+ * Frame pacing
+ * ------------
+ * The PIT ticks at 250 Hz. The target render rate is 60 Hz, which works
+ * out to one repaint every ~4 PIT ticks. We don't set dirty on a tick
+ * schedule though -- wm_update() decides when to repaint and resets the
+ * frame counter, so we never double-render in the same slice and we
+ * don't repaint a frame we haven't finished drawing yet.
+ */
+#define PIT_HZ          250
+#define PIT_DIVISOR     (1193180 / PIT_HZ)   /* 4772 */
+#define FRAME_TICKS     4                     /* 250 / 4 = 62.5 Hz */
+static u32 last_frame_tick;
+
 static void pit_irq(struct regs *r) {
     (void)r;
     ticks++;
-    /* Update more frequently for smoother rendering (every 5 ticks instead of 10) */
-    if ((ticks % 5) == 0) {
+    if (ticks - last_frame_tick >= FRAME_TICKS) {
         dirty = true;
     }
 }
 
 static void pit_init(void) {
-    /* Higher frequency (200 Hz instead of 100 Hz) for smoother rendering */
-    u32 div = 1193180 / 200;
+    u32 div = PIT_DIVISOR;
     outb(0x43, 0x36);
     outb(0x40, (u8)(div & 0xFF));
     outb(0x40, (u8)((div >> 8) & 0xFF));
+    last_frame_tick = 0;
     irq_register(0, pit_irq);
 }
 
@@ -524,6 +537,8 @@ void wm_update(void) {
         if (ticks < 440) {
             if (dirty) {
                 draw_startup();
+                gfx_flip();
+                last_frame_tick = ticks;
                 dirty = false;
             }
             return;
@@ -674,6 +689,13 @@ void wm_update(void) {
         cursor_draw(m.x, m.y);
         /* Flip backbuffer to screen for smooth rendering */
         gfx_flip();
+        /*
+         * Reset the frame counter so the PIT handler doesn't immediately
+         * re-arm dirty for the same time slice. This is what keeps the
+         * actual repaint rate close to the target 60 Hz instead of
+         * being capped by however long the last repaint took.
+         */
+        last_frame_tick = ticks;
         dirty = false;
     } else if (m.moved) {
         cursor_draw(m.x, m.y);

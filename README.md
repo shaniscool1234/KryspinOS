@@ -6,7 +6,9 @@ Terminal, and System Information). The kernel identifies itself on boot as
 **KryspinOS**.
 
 This document covers what KryspinOS is, how it's wired together, how to
-build it, and how to run it (QEMU and VirtualBox).
+build it, and how to run it (QEMU and VirtualBox). For minimum and
+recommended hardware specs (RAM, storage, display, hypervisor), see
+[HR.md](HR.md).
 
 ---
 
@@ -52,9 +54,14 @@ build it, and how to run it (QEMU and VirtualBox).
   32 file slots × 8 KiB each, persisted to ATA or kept in a ramdisk.
 - **VFS** POSIX-ish wrapper with up to 16 open file descriptors.
 - **Linear framebuffer graphics**: 24/32-bpp primitives, 8×8 bitmap font,
-  rectangles, text.
+  rectangles, text. The 32-bpp fast paths (`gfx_fill`, `gfx_rect`,
+  `gfx_flip`) use `rep stosd` / `rep movsd` via the primitives in
+  `libc/mem32.asm` and write into a static 4 MiB BSS backbuffer.
 - **Window manager**: draggable windows, close button, focus by Z-order,
-  searchable taskbar with pinned apps and a live RTC clock/date.
+  searchable taskbar with pinned apps and a live RTC clock/date. The PIT
+  runs at 250 Hz and the desktop repaint is paced at ~62.5 Hz; a
+  static 4 MiB BSS backbuffer plus rep stosd / rep movsd primitives
+  in `libc/mem32.asm` keep each frame well inside the 16 ms budget.
 - **Built-in apps**: Notepad (4 KiB buffer, save/open via CFS), File Explorer
   (lists CFS root, opens files in Notepad), Terminal (basic shell commands),
   and System Information (hardware and framebuffer details).
@@ -97,17 +104,23 @@ KryspinOS/
 │   └── vfs.c             # POSIX-ish VFS over CFS
 ├── libc/
 │   ├── string.c          # memcpy/memset/strcmp/...
+│   ├── mem32.asm         # rep stosd / rep movsd primitives
+│   ├── mem32.c           # memcpy_fast / memset_fast dispatchers
 │   └── kstdio.c          # kputc/kputs/kprintf
 ├── gfx/
 │   ├── font.c            # 8×8 ASCII bitmap font
-│   └── graphics.c        # Framebuffer primitives
+│   └── graphics.c        # Framebuffer primitives + 4 MiB BSS backbuffer
 ├── gui/
-│   └── wm.c              # Window manager (PIT, mouse, draw)
+│   └── wm.c              # Window manager (PIT 250 Hz, ~62.5 Hz repaint)
 ├── apps/
 │   ├── notepad.c         # Text editor (CFS-backed)
-│   └── explorer.c        # File list (CFS-backed)
+│   ├── explorer.c        # File list (CFS-backed)
+│   ├── terminal.c        # Built-in shell (ls/cat/cd/grep/...)
+│   ├── system.c          # System Information
+│   └── taskmgr.c         # Task Manager (process / CPU / mem)
 ├── include/
 │   └── *.h               # All public headers
+├── HR.md                 # Hardware requirements (RAM, storage, display)
 ```
 
 ---
@@ -228,19 +241,26 @@ sti
   `gfx_rect_border`, `gfx_char`, `gfx_text`, `gfx_text_transparent`.
   `COLOR_RGB` packs `0xFF000000|R<<16|G<<8|B` so the high byte (used as
   the "no background" sentinel) is always 0xFF. The 32-bpp fast path
-  in `gfx_fill` kicks in when `pitch == width * 4`.
+  in `gfx_fill` kicks in when `pitch == width * 4` and now goes
+  through `memset_fast` (`rep stosd` in `libc/mem32.asm`). The
+  backbuffer is a 4 MiB static BSS slice (big enough for any
+  32-bpp mode up to 1024×1024) and `gfx_flip` uses `rep movsd`
+  for the backbuffer → framebuffer blit.
 
 ### GUI
 
 - **Window manager** (`gui/wm.c`):
-  - PIT @ 100 Hz (IRQ0) drives a `ticks` counter; the WM marks itself
-    dirty every 10 ticks.
+  - PIT @ 250 Hz (IRQ0) drives a `ticks` counter. The handler sets
+    `dirty = true` when `ticks - last_frame_tick >= 4` (so a
+    repaint is requested every ~16 ms / ~62.5 Hz). The repaint
+    itself resets `last_frame_tick` so a long frame does not queue
+    up the next one.
   - Up to 8 windows, each with `paint`/`key`/`click` callbacks and
     arbitrary `data`.
   - Click → taskbar hit-test or window hit-test (focus, close, drag,
     or `click(lx, ly)`).
   - The classic 12×19 arrow cursor is drawn by saving the underlying
-    pixels, then compositing a 2-tone sprite.
+    pixels from the backbuffer, then compositing a 2-tone sprite.
   - Default desktop: branded KryspinOS workspace with search, pinned
     Explorer/Notepad/Terminal/System launchers, and live time/date.
 

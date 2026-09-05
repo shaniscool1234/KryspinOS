@@ -15,6 +15,7 @@ LDFLAGS := -m32 -T linker.ld -ffreestanding -O2 -nostdlib -lgcc
 C_SOURCES := \
 	kernel/kernel.c \
 	libc/string.c \
+	libc/mem32.c \
 	libc/kstdio.c \
 	drivers/vga.c \
 	drivers/keyboard.c \
@@ -43,10 +44,11 @@ C_SOURCES := \
 ASM_SOURCES := \
 	boot/boot.asm \
 	cpu/gdt_flush.asm \
-	cpu/isr.asm
+	cpu/isr.asm \
+	libc/mem32.asm
 
 C_OBJS   := $(C_SOURCES:%.c=build/%.o)
-ASM_OBJS := build/boot/boot_asm.o build/cpu/gdt_flush_asm.o build/cpu/isr_asm.o
+ASM_OBJS := build/boot/boot_asm.o build/cpu/gdt_flush_asm.o build/cpu/isr_asm.o build/libc/mem32_asm.o
 OBJS     := $(ASM_OBJS) $(C_OBJS)
 
 .PHONY: all iso kernel clean dirs
@@ -68,6 +70,9 @@ build/cpu/gdt_flush_asm.o: cpu/gdt_flush.asm | dirs
 	$(AS) $(ASFLAGS) $< -o $@
 
 build/cpu/isr_asm.o: cpu/isr.asm | dirs
+	$(AS) $(ASFLAGS) $< -o $@
+
+build/libc/mem32_asm.o: libc/mem32.asm | dirs
 	$(AS) $(ASFLAGS) $< -o $@
 
 build/kernel.bin: $(OBJS) linker.ld | dirs
