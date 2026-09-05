@@ -127,6 +127,7 @@ struct window *wm_create(const char *title, i32 x, i32 y, i32 w, i32 h) {
             win->w = w;
             win->h = h;
             win->z = ++z_top;
+            win->needs_paint = true; /* Kryspin OS #4 */
             focused = win;
             dirty = true;
             return win;
@@ -139,13 +140,38 @@ void wm_focus(struct window *w) {
     if (!w) {
         return;
     }
+    /*
+     * Focus changes mean both the old and new focused window need a
+     * repaint: their title bars use different colours depending on
+     * whether they are the active window. Mark both.
+     */
+    if (focused && focused != w && focused->used) {
+        focused->needs_paint = true;
+    }
     w->z = ++z_top;
+    w->needs_paint = true;
     focused = w;
     dirty = true;
 }
 
 struct window *wm_focused(void) {
     return focused;
+}
+
+void wm_invalidate(struct window *w) {
+    if (!w) return;
+    w->needs_paint = true;
+    dirty = true;
+}
+
+void wm_invalidate_all(void) {
+    int i;
+    for (i = 0; i < WM_MAX_WINDOWS; i++) {
+        if (windows[i].used) {
+            windows[i].needs_paint = true;
+        }
+    }
+    dirty = true;
 }
 
 void wm_open_notepad(const char *path) {
@@ -238,6 +264,16 @@ static void draw_app_icon(i32 x, i32 y, int kind, u32 color) {
     }
 }
 
+/*
+ * Restore the desktop wallpaper (COL_DESK) into an arbitrary rect.
+ * Used when a window is closed, dragged, or a popup is dismissed, so
+ * the area underneath is repainted with the background instead of
+ * left showing the old pixels. The damage tracker records the rect.
+ */
+static void repaint_wallpaper_rect(i32 x, i32 y, i32 w, i32 h) {
+    gfx_rect(x, y, w, h, COL_DESK);
+}
+
 static int decimal(u32 value, char *out, int cap) {
     char rev[12];
     int n = 0;
@@ -311,16 +347,16 @@ static void cursor_draw(i32 x, i32 y) {
     /* Clamp cursor to screen bounds to prevent black spots */
     i32 screen_w = (i32)gfx_width();
     i32 screen_h = (i32)gfx_height();
-    
+
     if (x < 0) x = 0;
     if (y < 0) y = 0;
     if (x + CURSOR_W > screen_w) x = screen_w - CURSOR_W;
     if (y + CURSOR_H > screen_h) y = screen_h - CURSOR_H;
-    
+
     cursor_restore();
     cursor_sx = x;
     cursor_sy = y;
-    
+
     /* Save background from backbuffer */
     for (j = 0; j < CURSOR_H; j++) {
         for (i = 0; i < CURSOR_W; i++) {
@@ -328,7 +364,7 @@ static void cursor_draw(i32 x, i32 y) {
         }
     }
     cursor_saved = true;
-    
+
     /* Draw cursor sprite */
     for (j = 0; j < CURSOR_H; j++) {
         for (i = 0; i < CURSOR_W; i++) {
@@ -340,9 +376,29 @@ static void cursor_draw(i32 x, i32 y) {
             }
         }
     }
+    /* Mark the cursor's new region as damaged for the partial flip. */
+    gfx_damage_add(x, y, CURSOR_W, CURSOR_H);
 }
 
-static void draw_window(struct window *w) {
+/*
+ * Kryspin OS #4: per-window chrome vs content split
+ *
+ * Before #4, every dirty frame redrew the entire desktop -- the
+ * wallpaper, every window, the taskbar, the clock, the cursor save
+ * region. For an idle frame where nothing changed except the cursor
+ * or the clock, that was 786K+ pixels of plot() work.
+ *
+ * After #4, each window's chrome (title, close button, icon, border,
+ * shadow) is only redrawn when the window itself is created, moved,
+ * focused, or closed. The content (paint callback) is only redrawn
+ * when the app sets needs_paint. The wallpaper and taskbar buttons
+ * are drawn once and invalidated by events. The clock and the cursor
+ * are the only things that change every frame, and they're tiny.
+ */
+static bool desktop_chrome_dirty = true;     /* wallpaper, branding */
+static bool taskbar_chrome_dirty = true;     /* taskbar buttons */
+
+static void draw_window_chrome(struct window *w) {
     u32 titlec = (w == focused) ? COL_TITLEF : COL_TITLE;
     gfx_rect(w->x + 3, w->y + 3, w->w, w->h, COL_SHADOW);
     gfx_rect(w->x, w->y, w->w, w->h, COL_WIN);
@@ -360,62 +416,45 @@ static void draw_window(struct window *w) {
     gfx_text_transparent(w->x + 30, w->y + 7, w->title, COL_WHITE);
     gfx_rect(w->x + w->w - 18, w->y + 4, 14, 14, COLOR_RGB(180, 64, 64));
     gfx_text_transparent(w->x + w->w - 15, w->y + 7, "x", COL_WHITE);
+}
+
+static void draw_window_content(struct window *w) {
     if (w->paint) {
         w->paint(w);
     }
 }
 
-static void draw_desktop(void) {
-    int i, n;
-    struct window *order[WM_MAX_WINDOWS];
-    char time[8];
-    char date[16];
-    i32 h = (i32)gfx_height();
+/*
+ * Draw the desktop chrome (wallpaper, branding). Called only when
+ * desktop_chrome_dirty is true. After drawing, the flag is cleared.
+ */
+static void draw_desktop_chrome(void) {
     i32 width = (i32)gfx_width();
-    i32 tb = h - WM_TASKBAR_H;
-
     gfx_fill(COL_DESK);
     gfx_rect(0, 0, width, 4, COL_ACCENT);
     gfx_rect(24, 26, 5, 58, COL_ACCENT);
     gfx_text_transparent(44, 28, "KryspinOS", COL_WHITE);
     gfx_text_transparent(44, 44, "A small, fast 32-bit graphical operating system", COLOR_RGB(181, 201, 226));
     gfx_text_transparent(44, 66, "Open an app from the taskbar to get started", COLOR_RGB(125, 157, 193));
+    desktop_chrome_dirty = false;
+}
 
-    n = 0;
-    for (i = 0; i < WM_MAX_WINDOWS; i++) {
-        if (windows[i].used) {
-            order[n++] = &windows[i];
-        }
-    }
-    /* simple z-sort */
-    {
-        int a, b;
-        for (a = 0; a < n; a++) {
-            for (b = a + 1; b < n; b++) {
-                if (order[b]->z < order[a]->z) {
-                    struct window *t = order[a];
-                    order[a] = order[b];
-                    order[b] = t;
-                }
-            }
-        }
-    }
-    for (i = 0; i < n; i++) {
-        draw_window(order[i]);
-    }
-
+/*
+ * Draw the static taskbar chrome (background, buttons, search box,
+ * launcher icons). Called only when taskbar_chrome_dirty is true.
+ */
+static void draw_taskbar_chrome(void) {
+    i32 h = (i32)gfx_height();
+    i32 width = (i32)gfx_width();
+    i32 tb = h - WM_TASKBAR_H;
     gfx_rect(0, tb, width, WM_TASKBAR_H, COL_TASK);
     gfx_rect(0, tb, width, 2, COLOR_RGB(48, 69, 94));
     gfx_rect(0, tb + 2, 4, WM_TASKBAR_H - 2, COL_ACCENT);
-
     gfx_rect(12, tb + 8, 42, 30, COL_ACCENT);
     gfx_rect(31, tb + 13, 2, 10, COL_WHITE);
     gfx_rect(26, tb + 18, 12, 2, COL_WHITE);
     gfx_rect(66, tb + 8, 194, 30, COL_SEARCH);
     gfx_rect_border(66, tb + 8, 194, 30, COLOR_RGB(79, 103, 133));
-    gfx_text_transparent(78, tb + 18, search_input[0] ? search_input : "Search apps...", 
-                         search_input[0] ? COL_WHITE : COLOR_RGB(147, 169, 194));
-
     gfx_rect(274, tb + 8, 92, 30, COL_BTN);
     draw_app_icon(282, tb + 14, 1, COLOR_RGB(247, 188, 67));
     gfx_text_transparent(304, tb + 18, "Explorer", COL_WHITE);
@@ -428,11 +467,41 @@ static void draw_desktop(void) {
     gfx_rect(570, tb + 8, 92, 30, COL_BTN);
     draw_app_icon(578, tb + 14, 4, COLOR_RGB(180, 196, 214));
     gfx_text_transparent(600, tb + 18, "System", COL_WHITE);
+    taskbar_chrome_dirty = false;
+}
 
+/*
+ * Draw only the dynamic taskbar elements: the search input text and
+ * the live clock. These change every frame (search) or once per
+ * second (clock), so they're painted outside the chrome.
+ */
+static void draw_taskbar_dynamic(void) {
+    i32 h = (i32)gfx_height();
+    i32 width = (i32)gfx_width();
+    i32 tb = h - WM_TASKBAR_H;
+    char time[8];
+    char date[16];
+    /* Erase the regions we own. The chrome has already drawn the
+     * surrounding background. */
+    gfx_rect(78, tb + 14, 178, 12, COL_SEARCH);
+    gfx_rect(width - 116, tb + 7, 112, 32, COL_TASK);
+    /* Search text. */
+    gfx_text_transparent(78, tb + 18,
+        search_input[0] ? search_input : "Search apps...",
+        search_input[0] ? COL_WHITE : COLOR_RGB(147, 169, 194));
+    /* Clock. */
     format_datetime(time, date);
     gfx_text_transparent(width - 112, tb + 11, time, COL_WHITE);
     gfx_text_transparent(width - 112, tb + 27, date, COLOR_RGB(161, 186, 211));
+}
 
+/*
+ * Draw the popup overlays (search menu, power menu, taskbar right-
+ * click menu). These are conditional and have their own clip region.
+ */
+static void draw_popups(void) {
+    i32 h = (i32)gfx_height();
+    i32 tb = h - WM_TASKBAR_H;
     if (search_active) {
         gfx_rect(66, tb - 126, 194, 118, COLOR_RGB(25, 35, 49));
         gfx_rect_border(66, tb - 126, 194, 118, COLOR_RGB(79, 103, 133));
@@ -454,6 +523,52 @@ static void draw_desktop(void) {
         gfx_rect_border(taskbar_menu_x, tb - 38, 150, 36, COLOR_RGB(87, 105, 126));
         gfx_text_transparent(taskbar_menu_x + 12, tb - 26, "Task Manager", COL_TEXT);
     }
+}
+
+/*
+ * The composite repaint. Resolves the cache/flags and draws the
+ * minimum subset that has changed since the last frame.
+ */
+static void draw_desktop(void) {
+    int i, n;
+    struct window *order[WM_MAX_WINDOWS];
+
+    if (desktop_chrome_dirty) {
+        draw_desktop_chrome();
+    }
+
+    /* Collect active windows in z-order. */
+    n = 0;
+    for (i = 0; i < WM_MAX_WINDOWS; i++) {
+        if (windows[i].used) {
+            order[n++] = &windows[i];
+        }
+    }
+    for (int a = 0; a < n; a++) {
+        for (int b = a + 1; b < n; b++) {
+            if (order[b]->z < order[a]->z) {
+                struct window *t = order[a];
+                order[a] = order[b];
+                order[b] = t;
+            }
+        }
+    }
+    /* Redraw each window's chrome if the window was just created or
+     * moved. needs_paint alone only means content. */
+    for (i = 0; i < n; i++) {
+        struct window *w = order[i];
+        if (w->needs_paint) {
+            draw_window_chrome(w);
+            draw_window_content(w);
+            w->needs_paint = false;
+        }
+    }
+
+    if (taskbar_chrome_dirty) {
+        draw_taskbar_chrome();
+    }
+    draw_taskbar_dynamic();
+    draw_popups();
 }
 
 static void draw_startup(void) {
@@ -562,29 +677,39 @@ void wm_update(void) {
 
     if (m.left && !was_left) {
         if (power_menu) {
+            i32 h = (i32)gfx_height();
+            i32 tb = h - WM_TASKBAR_H;
             if (m.x >= 8 && m.x < 162 && m.y >= tb - 102 && m.y < tb - 78) {
                 power_menu = false;
+                repaint_wallpaper_rect(8, tb - 102, 154, 94);
                 dirty = true;
                 power_restart();
             } else if (m.x >= 8 && m.x < 162 && m.y >= tb - 78 && m.y < tb - 54) {
                 power_menu = false;
+                repaint_wallpaper_rect(8, tb - 102, 154, 94);
                 dirty = true;
                 power_shutdown();
             } else if (m.x >= 8 && m.x < 162 && m.y >= tb - 54 && m.y < tb - 30) {
                 power_menu = false;
+                repaint_wallpaper_rect(8, tb - 102, 154, 94);
                 dirty = true;
                 power_sleep();
             } else {
                 power_menu = false;
+                repaint_wallpaper_rect(8, tb - 102, 154, 94);
                 dirty = true;
             }
         } else if (taskbar_menu) {
+            i32 h = (i32)gfx_height();
+            i32 tb = h - WM_TASKBAR_H;
             if (m.x >= taskbar_menu_x && m.x < taskbar_menu_x + 150 &&
                 m.y >= tb - 38 && m.y < tb - 2) {
                 taskbar_menu = false;
+                repaint_wallpaper_rect(taskbar_menu_x, tb - 38, 150, 36);
                 wm_open_task_manager();
             } else {
                 taskbar_menu = false;
+                repaint_wallpaper_rect(taskbar_menu_x, tb - 38, 150, 36);
             }
             dirty = true;
         } else if (m.y >= tb) {
@@ -614,16 +739,27 @@ void wm_update(void) {
                 wm_focus(w);
                 if (m.x >= w->x + w->w - 18 && m.x < w->x + w->w - 4 &&
                     m.y >= w->y + 4 && m.y < w->y + 18) {
-                    w->used = false;
+                    /*
+                     * Close button. Restore the wallpaper under the
+                     * window so the desktop chrome shows through
+                     * cleanly, then mark the window unused. The next
+                     * repaint will only redraw the closed window's
+                     * old rectangle plus whatever was on top of it.
+                     */
+                    repaint_wallpaper_rect(w->x - 3, w->y - 3,
+                                           w->w + 6, w->h + 6);
                     if (focused == w) {
                         focused = NULL;
                     }
+                    w->used = false;
                 } else if (m.y < w->y + WM_TITLE_H) {
                     w->dragging = true;
                     w->drag_ox = m.x - w->x;
                     w->drag_oy = m.y - w->y;
                 } else if (w->click) {
                     w->click(w, m.x - w->x, m.y - w->y - WM_TITLE_H);
+                    /* The click callback may have changed app state. */
+                    w->needs_paint = true;
                 }
                 dirty = true;
             }
@@ -638,10 +774,22 @@ void wm_update(void) {
         int i;
         for (i = 0; i < WM_MAX_WINDOWS; i++) {
             if (windows[i].used && windows[i].dragging) {
-                windows[i].x = m.x - windows[i].drag_ox;
-                windows[i].y = m.y - windows[i].drag_oy;
-                if (windows[i].x < 0) windows[i].x = 0;
-                if (windows[i].y < 0) windows[i].y = 0;
+                struct window *wd = &windows[i];
+                i32 old_x = wd->x, old_y = wd->y;
+                wd->x = m.x - wd->drag_ox;
+                wd->y = m.y - wd->drag_oy;
+                if (wd->x < 0) wd->x = 0;
+                if (wd->y < 0) wd->y = 0;
+                /*
+                 * Restore wallpaper at the OLD position so the dragged
+                 * window doesn't leave a trail, then mark the window
+                 * for a full repaint (chrome + content) at the new
+                 * position. The damage rects are recorded by the gfx
+                 * primitives themselves.
+                 */
+                repaint_wallpaper_rect(old_x - 3, old_y - 3,
+                                       wd->w + 6, wd->h + 6);
+                wd->needs_paint = true;
                 dirty = true;
             }
         }
@@ -651,6 +799,7 @@ void wm_update(void) {
 
     while (keyboard_read(&ch)) {
         if (search_active) {
+            bool was_active = search_active;
             if (ch == 27) {
                 search_active = false;
                 search_input[0] = 0;
@@ -676,19 +825,53 @@ void wm_update(void) {
                     search_input[n + 1] = 0;
                 }
             }
+            /*
+             * If the popup is going away (Esc / Enter), repaint the
+             * wallpaper under the popup rect so the desktop chrome
+             * shows through.
+             */
+            if (was_active && !search_active) {
+                i32 h = (i32)gfx_height();
+                i32 tb = h - WM_TASKBAR_H;
+                repaint_wallpaper_rect(66, tb - 126, 194, 118);
+            }
             dirty = true;
         } else if (focused && focused->used && focused->key) {
             focused->key(focused, ch);
+            /* The key callback may have changed app state. */
+            focused->needs_paint = true;
             dirty = true;
         }
     }
 
     if (dirty) {
+        /*
+         * Clear the damage list before drawing, then run the composite
+         * repaint. The gfx primitives self-record damage for every rect
+         * and text they touch, so by the time draw_desktop returns, the
+         * damage list describes exactly which pixels changed this frame.
+         */
+        gfx_damage_clear();
+        i32 csx0 = cursor_sx, csy0 = cursor_sy;
         cursor_saved = false;
         draw_desktop();
+        /*
+         * If the cursor was previously at a different position, record
+         * that rectangle as damaged so the partial flip erases the old
+         * cursor. The new cursor's region is added by cursor_draw below.
+         */
+        cursor_restore();
         cursor_draw(m.x, m.y);
-        /* Flip backbuffer to screen for smooth rendering */
-        gfx_flip();
+        if (csx0 >= 0 && csy0 >= 0) {
+            i32 ox1 = csx0, oy1 = csy0;
+            i32 ox2 = csx0 + CURSOR_W, oy2 = csy0 + CURSOR_H;
+            if (ox1 < 0) ox1 = 0; if (oy1 < 0) oy1 = 0;
+            if (ox2 > (i32)gfx_width())  ox2 = (i32)gfx_width();
+            if (oy2 > (i32)gfx_height()) oy2 = (i32)gfx_height();
+            if (ox1 < ox2 && oy1 < oy2)
+                gfx_damage_add(ox1, oy1, ox2 - ox1, oy2 - oy1);
+        }
+        gfx_flip_damaged();
         /*
          * Reset the frame counter so the PIT handler doesn't immediately
          * re-arm dirty for the same time slice. This is what keeps the
@@ -698,8 +881,31 @@ void wm_update(void) {
         last_frame_tick = ticks;
         dirty = false;
     } else if (m.moved) {
+        /*
+         * Mouse-only movement: redraw the cursor (save old region,
+         * composite at new), then flip just the cursor's old + new
+         * bounding boxes. No need to repaint the desktop.
+         */
+        i32 csx = cursor_sx, csy = cursor_sy;
+        cursor_restore();
         cursor_draw(m.x, m.y);
-        /* Also flip on mouse movement for smooth cursor updates */
-        gfx_flip();
+        i32 nx1 = cursor_sx, ny1 = cursor_sy;
+        i32 nx2 = cursor_sx + CURSOR_W;
+        i32 ny2 = cursor_sy + CURSOR_H;
+        i32 ox1 = csx, oy1 = csy;
+        i32 ox2 = csx + CURSOR_W;
+        i32 oy2 = csy + CURSOR_H;
+        if (ox1 < 0) ox1 = 0; if (oy1 < 0) oy1 = 0;
+        if (nx1 < 0) nx1 = 0; if (ny1 < 0) ny1 = 0;
+        if (ox2 > (i32)gfx_width())  ox2 = (i32)gfx_width();
+        if (oy2 > (i32)gfx_height()) oy2 = (i32)gfx_height();
+        if (nx2 > (i32)gfx_width())  nx2 = (i32)gfx_width();
+        if (ny2 > (i32)gfx_height()) ny2 = (i32)gfx_height();
+        if (ox1 < ox2 && oy1 < oy2)
+            gfx_damage_add(ox1, oy1, ox2 - ox1, oy2 - oy1);
+        if (nx1 < nx2 && ny1 < ny2)
+            gfx_damage_add(nx1, ny1, nx2 - nx1, ny2 - ny1);
+        gfx_flip_damaged();
+        gfx_damage_clear();
     }
 }

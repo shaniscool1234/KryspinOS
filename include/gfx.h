@@ -18,7 +18,18 @@ void gfx_rect_border(i32 x, i32 y, i32 w, i32 h, u32 color);
 void gfx_char(i32 x, i32 y, char c, u32 fg, u32 bg);
 void gfx_text(i32 x, i32 y, const char *s, u32 fg, u32 bg);
 void gfx_text_transparent(i32 x, i32 y, const char *s, u32 fg);
+void gfx_text_blit(i32 x, i32 y, const char *s, u32 fg, u32 bg);
+void gfx_text_blit_transparent(i32 x, i32 y, const char *s, u32 fg);
 void gfx_flip(void);  /* Double buffering: flip back buffer to screen */
 void gfx_clear_dirty(void);  /* Clear dirty rectangles for partial updates */
+
+/* ----- damage-rectangle API (Kryspin OS #4) ----- */
+#define GFX_MAX_DAMAGE 32
+
+void gfx_damage_clear(void);
+void gfx_damage_add(i32 x, i32 y, i32 w, i32 h);
+void gfx_damage_add_window(i32 x, i32 y, i32 w, i32 h);
+void gfx_flip_damaged(void);   /* Flip only the union of damage rects */
+bool gfx_has_damage(void);
 
 #endif

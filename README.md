@@ -57,11 +57,20 @@ recommended hardware specs (RAM, storage, display, hypervisor), see
   rectangles, text. The 32-bpp fast paths (`gfx_fill`, `gfx_rect`,
   `gfx_flip`) use `rep stosd` / `rep movsd` via the primitives in
   `libc/mem32.asm` and write into a static 4 MiB BSS backbuffer.
+  `gfx_text_blit` (Kryspin OS #4) renders a whole string row as one
+  u32 write per glyph row, cutting text cost ~8x; the gfx layer
+  self-records damage rectangles so `gfx_flip_damaged` only blits
+  what changed.
 - **Window manager**: draggable windows, close button, focus by Z-order,
   searchable taskbar with pinned apps and a live RTC clock/date. The PIT
   runs at 250 Hz and the desktop repaint is paced at ~62.5 Hz; a
   static 4 MiB BSS backbuffer plus rep stosd / rep movsd primitives
   in `libc/mem32.asm` keep each frame well inside the 16 ms budget.
+  The window manager (Kryspin OS #4) splits the desktop into a static
+  chrome layer (wallpaper, taskbar buttons, window borders) and a
+  per-window content layer; combined with damage-rect tracking and
+  `gfx_flip_damaged`, an idle frame only blits the cursor's old and
+  new regions plus the clock, not the whole 3 MiB surface.
 - **Built-in apps**: Notepad (4 KiB buffer, save/open via CFS), File Explorer
   (lists CFS root, opens files in Notepad), Terminal (basic shell commands),
   and System Information (hardware and framebuffer details).

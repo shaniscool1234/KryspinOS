@@ -51,6 +51,22 @@ static u8 red_pos, red_size;
 static u8 green_pos, green_size;
 static u8 blue_pos, blue_size;
 
+/* Forward declarations for the damage-rect API. The implementations
+ * sit below the drawing code, but the drawing primitives need to
+ * record damage into them, so we need prototypes in scope. */
+#define GFX_MAX_DAMAGE 32
+struct damage_rect {
+    i32 x, y, w, h;
+    bool alive;
+};
+static struct damage_rect damage[GFX_MAX_DAMAGE];
+static int damage_count;
+static bool damage_any;
+void gfx_damage_clear(void);
+void gfx_damage_add(i32 x, i32 y, i32 w, i32 h);
+bool gfx_has_damage(void);
+static void flip_one(i32 x, i32 y, i32 w, i32 h);
+
 void gfx_init(struct multiboot_info *mb) {
     ready = false;
     fb = NULL;
@@ -196,13 +212,15 @@ void gfx_fill(u32 color) {
          */
         u32 pixel = pack(color);
         memset_fast(backbuffer, (int)pixel, (size_t)pitch * height);
-        return;
-    }
-    for (y = 0; y < height; y++) {
-        for (x = 0; x < width; x++) {
-            plot((i32)x, (i32)y, color);
+    } else {
+        for (y = 0; y < height; y++) {
+            for (x = 0; x < width; x++) {
+                plot((i32)x, (i32)y, color);
+            }
         }
     }
+    /* Full screen = single damage rect. */
+    gfx_damage_add(0, 0, (i32)width, (i32)height);
 }
 
 void gfx_rect(i32 x, i32 y, i32 w, i32 h, u32 color) {
@@ -231,20 +249,20 @@ void gfx_rect(i32 x, i32 y, i32 w, i32 h, u32 color) {
             u8 *row = backbuffer + (u32)(y + j) * pitch + (u32)x * 4u;
             memset_fast(row, (int)pixel, (size_t)words * 4u);
         }
-        return;
-    }
-
-    /* Generic fallback. */
-    for (j = 0; j < h; j++) {
-        i32 i;
-        for (i = 0; i < w; i++) {
-            plot(x + i, y + j, color);
+    } else {
+        /* Generic fallback. */
+        for (j = 0; j < h; j++) {
+            i32 i;
+            for (i = 0; i < w; i++) {
+                plot(x + i, y + j, color);
+            }
         }
     }
+    /* Record the dirty region for the partial flip. */
+    gfx_damage_add(x, y, w, h);
 }
 
 void gfx_rect_border(i32 x, i32 y, i32 w, i32 h, u32 color) {
-    i32 i;
     if (w <= 0 || h <= 0) {
         return;
     }
@@ -254,7 +272,6 @@ void gfx_rect_border(i32 x, i32 y, i32 w, i32 h, u32 color) {
     /* Left and right edges. */
     gfx_rect(x, y, 1, h, color);
     gfx_rect(x + w - 1, y, 1, h, color);
-    (void)i;
 }
 
 void gfx_char(i32 x, i32 y, char c, u32 fg, u32 bg) {
@@ -268,19 +285,37 @@ void gfx_char(i32 x, i32 y, char c, u32 fg, u32 bg) {
         uc = 127;
     }
     g = font8x8[uc - 32];
-    for (row = 0; row < FONT_H; row++) {
-        for (col = 0; col < FONT_W; col++) {
+    if (bg == 0xFFFFFFFF) {
+        /* Transparent: only set the set bits. */
+        for (row = 0; row < FONT_H; row++) {
+            for (col = 0; col < FONT_W; col++) {
                 if (g[row] & (0x80u >> col)) {
-                plot(x + col, y + row, fg);
-            } else if (bg != 0xFFFFFFFF) {
-                plot(x + col, y + row, bg);
+                    plot(x + col, y + row, fg);
+                }
+            }
+        }
+    } else {
+        /* Opaque: every pixel, two colours. */
+        for (row = 0; row < FONT_H; row++) {
+            for (col = 0; col < FONT_W; col++) {
+                plot(x + col, y + row,
+                     (g[row] & (0x80u >> col)) ? fg : bg);
             }
         }
     }
+    /* The 8x8 glyph is the dirty region. */
+    gfx_damage_add(x, y, FONT_W, FONT_H);
 }
 
 void gfx_text(i32 x, i32 y, const char *s, u32 fg, u32 bg) {
     i32 cx = x;
+    i32 chars = 0;
+    const char *p;
+    /* First pass: measure. */
+    for (p = s; *p; p++) {
+        if (*p != '\n') chars++;
+    }
+    if (chars == 0) return;
     while (*s) {
         if (*s == '\n') {
             y += FONT_H + 2;
@@ -291,10 +326,104 @@ void gfx_text(i32 x, i32 y, const char *s, u32 fg, u32 bg) {
         }
         s++;
     }
+    /* One rect for the whole string. */
+    gfx_damage_add(x, y, chars * FONT_W, FONT_H);
 }
 
 void gfx_text_transparent(i32 x, i32 y, const char *s, u32 fg) {
     gfx_text(x, y, s, fg, 0xFFFFFFFF);
+}
+
+/* --------------------------------------------------------------------------
+ * Row-major text blit (Kryspin OS #4)
+ *
+ * The 8x8 font stores one byte per row, MSB = leftmost pixel. For the
+ * native 32-bpp BGRX layout, each glyph row expands to a single u32
+ * (8 pixels * 4 bytes = 32 bits packed) and the whole glyph is 8 u32
+ * stores. That cuts the per-glyph cost from 64 plot() calls to 8
+ * stores -- roughly 8x faster on the backbuffer.
+ *
+ * Transparent (bg == 0xFFFFFFFF) reads the existing u32 first and only
+ * ORs in the set bits, so off-pixels leave the background untouched.
+ *
+ * This only fires when the layout is exactly the native 32-bpp BGRX
+ * (red_pos=16, green_pos=8, blue_pos=0). The legacy per-pixel path is
+ * preserved for the fallback cases.
+ * --------------------------------------------------------------------------
+ */
+void gfx_text_blit(i32 x, i32 y, const char *s, u32 fg, u32 bg) {
+    if (!ready || !s || !*s) return;
+
+    const bool can_fast =
+        (bpp == 32) &&
+        (red_pos == 16) && (green_pos == 8) && (blue_pos == 0) &&
+        (red_size == 8) && (green_size == 8) && (blue_size == 8);
+
+    if (!can_fast) {
+        gfx_text(x, y, s, fg, bg);
+        return;
+    }
+
+    const u32 fg_packed = pack(fg);
+    i32 cx = x;
+    i32 chars = 0;
+    const char *p;
+    for (p = s; *p; p++) {
+        if (*p != '\n') chars++;
+    }
+    if (chars == 0) return;
+
+    while (*s) {
+        if (*s == '\n') {
+            y += FONT_H + 2;
+            cx = x;
+            s++;
+            continue;
+        }
+        u8 uc = (u8)*s;
+        if (uc < 32) uc = 32;
+        if (uc > 127) uc = 127;
+        const u8 *glyph = font8x8[uc - 32];
+        const bool off_screen =
+            (cx + FONT_W <= 0) || (cx >= (i32)width) ||
+            (y + FONT_H <= 0)  || (y >= (i32)height);
+        if (!off_screen) {
+            for (int row = 0; row < FONT_H; row++) {
+                const u8 bits = glyph[row];
+                u8 *row_ptr = backbuffer + (u32)(y + row) * pitch + (u32)cx * 4u;
+                if (bg == 0xFFFFFFFF) {
+                    /* Read-modify-write: only set the bits that are
+                     * lit in the glyph. Other pixels stay. */
+                    u32 cur = *(u32 *)row_ptr;
+                    u32 v = 0;
+                    for (int col = 0; col < FONT_W; col++) {
+                        if (bits & (0x80u >> col)) {
+                            v |= fg_packed << (col * 4);
+                        }
+                    }
+                    *(u32 *)row_ptr = cur | v;
+                } else {
+                    /* Opaque: build a u32 with fg in set bits and bg
+                     * in clear bits, then store once. */
+                    u32 v = 0;
+                    for (int col = 0; col < FONT_W; col++) {
+                        v |= (bits & (0x80u >> col)) ? (fg_packed << (col * 4))
+                                                      : ((u32)(u8)bg    << (col * 4));
+                    }
+                    *(u32 *)row_ptr = v;
+                }
+            }
+        }
+        cx += FONT_W;
+        s++;
+    }
+    /* One damage rect for the whole string (clipped to screen inside
+     * gfx_damage_add). */
+    gfx_damage_add(x, y, chars * FONT_W, FONT_H);
+}
+
+void gfx_text_blit_transparent(i32 x, i32 y, const char *s, u32 fg) {
+    gfx_text_blit(x, y, s, fg, 0xFFFFFFFF);
 }
 
 void gfx_flip(void) {
@@ -313,4 +442,150 @@ void gfx_flip(void) {
 void gfx_clear_dirty(void) {
     /* No-op for now - could be used for partial updates later */
     (void)ready;
+}
+
+/* --------------------------------------------------------------------------
+ * Damage rectangles (Kryspin OS #4)
+ *
+ * The repaint loop records which regions of the backbuffer it touched, and
+ * the partial flip only blits those regions to the framebuffer. The old
+ * gfx_flip blits the entire surface; the new gfx_flip_damaged blits only
+ * what changed. For a "type a character in Notepad" frame this is
+ * typically a 9x16 px rect, a few hundred bytes per row, instead of a
+ * full 1024x768x32 surface.
+ *
+ * Rectangles are in screen coordinates and stored in screen space -- the
+ * flip routine is the only consumer. gfx_damage_add_window exists as a
+ * separate entry point so a future caller can hand the WM a window rect
+ * without needing to add four separate line bands by hand.
+ * --------------------------------------------------------------------------
+ */
+
+void gfx_damage_clear(void) {
+    damage_count = 0;
+    damage_any = false;
+    for (int i = 0; i < GFX_MAX_DAMAGE; i++) {
+        damage[i].alive = false;
+        damage[i].x = damage[i].y = damage[i].w = damage[i].h = 0;
+    }
+}
+
+bool gfx_has_damage(void) { return damage_any; }
+
+void gfx_damage_add(i32 x, i32 y, i32 w, i32 h) {
+    if (!ready || w <= 0 || h <= 0) {
+        return;
+    }
+    /* Clip to screen. */
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > (i32)width)  w = (i32)width  - x;
+    if (y + h > (i32)height) h = (i32)height - y;
+    if (w <= 0 || h <= 0) {
+        return;
+    }
+
+    /*
+     * Try to extend an existing rect that overlaps this one. If the new
+     * rect is fully contained in an alive rect, no work needed. Otherwise
+     * try to grow an existing rect to include it; if no candidate
+     * exists, allocate a fresh slot.
+     */
+    for (int i = 0; i < damage_count; i++) {
+        if (!damage[i].alive) continue;
+        struct damage_rect *r = &damage[i];
+        i32 rx2 = r->x + r->w, ry2 = r->y + r->h;
+        i32 nx2 = x + w, ny2 = y + h;
+        if (x >= r->x && y >= r->y && nx2 <= rx2 && ny2 <= ry2) {
+            return; /* already covered */
+        }
+        /* If the rects overlap or are adjacent, merge. */
+        if (x <= rx2 && nx2 >= r->x && y <= ry2 && ny2 >= r->y) {
+            i32 nx = (x < r->x) ? x : r->x;
+            i32 ny = (y < r->y) ? y : r->y;
+            i32 nw = ((nx2 > rx2) ? nx2 : rx2) - nx;
+            i32 nh = ((ny2 > ry2) ? ny2 : ry2) - ny;
+            r->x = nx; r->y = ny; r->w = nw; r->h = nh;
+            damage_any = true;
+            return;
+        }
+    }
+    if (damage_count < GFX_MAX_DAMAGE) {
+        damage[damage_count].x = x;
+        damage[damage_count].y = y;
+        damage[damage_count].w = w;
+        damage[damage_count].h = h;
+        damage[damage_count].alive = true;
+        damage_count++;
+        damage_any = true;
+        return;
+    }
+    /* Out of slots: add a full-screen rect. Better safe than sorry. */
+    damage[0].x = 0;
+    damage[0].y = 0;
+    damage[0].w = (i32)width;
+    damage[0].h = (i32)height;
+    damage[0].alive = true;
+    damage_any = true;
+}
+
+void gfx_damage_add_window(i32 x, i32 y, i32 w, i32 h) {
+    gfx_damage_add(x, y, w, h);
+}
+
+static void flip_one(i32 x, i32 y, i32 w, i32 h) {
+    /*
+     * Blit (x, y, w, h) from the backbuffer to the framebuffer. Each
+     * row is a rep movsd of `w` dwords. Aligned (x, w*4) and the
+     * backbuffer start are guaranteed because pitch is 4-byte aligned
+     * and the backbuffer itself is at a 16-byte boundary.
+     */
+    if (w <= 0 || h <= 0) return;
+    i32 bytes_per_row = w * 4;
+    for (i32 row = 0; row < h; row++) {
+        u8 *src = backbuffer + (u32)(y + row) * pitch + (u32)x * 4u;
+        u8 *dst = fb       + (u32)(y + row) * pitch + (u32)x * 4u;
+        memcpy_fast(dst, src, (size_t)bytes_per_row);
+    }
+}
+
+void gfx_flip_damaged(void) {
+    if (!ready) return;
+    if (!damage_any || damage_count == 0) {
+        /* Nothing changed; flip nothing. */
+        return;
+    }
+    /* Coalesce pass: for every pair, if they overlap, merge into the
+     * earlier one and mark the later one dead. O(n^2) but n is at most
+     * 32, so 1024 comparisons, negligible. */
+    for (int i = 0; i < damage_count; i++) {
+        if (!damage[i].alive) continue;
+        for (int j = i + 1; j < damage_count; j++) {
+            if (!damage[j].alive) continue;
+            i32 ax1 = damage[i].x;
+            i32 ay1 = damage[i].y;
+            i32 ax2 = ax1 + damage[i].w;
+            i32 ay2 = ay1 + damage[i].h;
+            i32 bx1 = damage[j].x;
+            i32 by1 = damage[j].y;
+            i32 bx2 = bx1 + damage[j].w;
+            i32 by2 = by1 + damage[j].h;
+            if (ax1 <= bx2 && ax2 >= bx1 && ay1 <= by2 && ay2 >= by1) {
+                i32 nx = (ax1 < bx1) ? ax1 : bx1;
+                i32 ny = (ay1 < by1) ? ay1 : by1;
+                i32 nw = ((ax2 > bx2) ? ax2 : bx2) - nx;
+                i32 nh = ((ay2 > by2) ? ay2 : by2) - ny;
+                damage[i].x = nx;
+                damage[i].y = ny;
+                damage[i].w = nw;
+                damage[i].h = nh;
+                damage[j].alive = false;
+            }
+        }
+    }
+    /* Blit survivors. */
+    for (int i = 0; i < damage_count; i++) {
+        if (!damage[i].alive) continue;
+        flip_one(damage[i].x, damage[i].y, damage[i].w, damage[i].h);
+    }
 }
