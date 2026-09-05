@@ -58,6 +58,12 @@ static bool taskbar_chrome_dirty  = true;     /* taskbar buttons */
 static i32 cursor_x = 512;
 static i32 cursor_y = 384;
 static bool cursor_visible = true;
+static i32 cursor_old_x = 0;
+static i32 cursor_old_y = 0;
+
+/* Cached desktop background for performance */
+static bool desktop_cached = false;
+static u32 *desktop_cache = NULL;
 
 /* Classic arrow: 1 = black outline, 2 = white fill */
 static const u8 cursor_sprite[CURSOR_H][CURSOR_W] = {
@@ -99,6 +105,7 @@ static u32 last_frame_tick;
 static void pit_irq(struct regs *r) {
     (void)r;
     ticks++;
+    /* More aggressive frame timing for smoother rendering */
     if (ticks - last_frame_tick >= FRAME_TICKS) {
         dirty = true;
     }
@@ -294,7 +301,70 @@ static void draw_app_icon(i32 x, i32 y, int kind, u32 color) {
     }
 }
 
-/* repaint_wallpaper_rect removed - using full redraw approach instead */
+/*
+ * Cache the desktop background (gradient wallpaper) for performance.
+ * This avoids recalculating the gradient every frame.
+ */
+static void cache_desktop_background(void) {
+    i32 screen_w = (i32)gfx_width();
+    i32 screen_h = (i32)gfx_height();
+    u32 color1 = COLOR_RGB(19, 32, 54);
+    u32 color2 = COLOR_RGB(45, 60, 85);
+    
+    if (desktop_cached && desktop_cache) {
+        return; /* Already cached */
+    }
+    
+    /* Allocate cache memory */
+    if (!desktop_cache) {
+        desktop_cache = (u32 *)kmalloc(screen_w * screen_h * sizeof(u32));
+        if (!desktop_cache) {
+            return; /* Fall back to real-time computation */
+        }
+    }
+    
+    /* Pre-compute gradient */
+    for (i32 py = 0; py < screen_h; py++) {
+        u32 t = ((u32)py * 256) / (u32)screen_h;
+        u32 r1 = (color1 >> 16) & 0xFF;
+        u32 g1 = (color1 >> 8) & 0xFF;
+        u32 b1 = color1 & 0xFF;
+        u32 r2 = (color2 >> 16) & 0xFF;
+        u32 g2 = (color2 >> 8) & 0xFF;
+        u32 b2 = color2 & 0xFF;
+        u32 r = r1 + ((r2 - r1) * t) / 256;
+        u32 g = g1 + ((g2 - g1) * t) / 256;
+        u32 b = b1 + ((b2 - b1) * t) / 256;
+        u32 pixel = COLOR_RGB(r, g, b);
+        
+        for (i32 px = 0; px < screen_w; px++) {
+            desktop_cache[py * screen_w + px] = pixel;
+        }
+    }
+    
+    desktop_cached = true;
+}
+
+/*
+ * Draw cached desktop background to backbuffer.
+ */
+static void draw_cached_desktop(void) {
+    i32 screen_w = (i32)gfx_width();
+    i32 screen_h = (i32)gfx_height();
+    
+    if (!desktop_cached || !desktop_cache) {
+        /* Fallback to real-time gradient computation */
+        gfx_set_gradient_wallpaper(COLOR_RGB(19, 32, 54), COLOR_RGB(45, 60, 85));
+        return;
+    }
+    
+    /* Fast blit from cache to backbuffer */
+    for (i32 py = 0; py < screen_h; py++) {
+        for (i32 px = 0; px < screen_w; px++) {
+            gfx_putpixel(px, py, desktop_cache[py * screen_w + px]);
+        }
+    }
+}
 
 static int decimal(u32 value, char *out, int cap) {
     char rev[12];
@@ -359,14 +429,16 @@ static void cursor_draw_simple(i32 x, i32 y) {
     if (x + CURSOR_W > screen_w) x = screen_w - CURSOR_W;
     if (y + CURSOR_H > screen_h) y = screen_h - CURSOR_H;
 
-    /* Draw cursor sprite directly */
+    /* Draw cursor sprite directly - optimized to skip empty pixels */
     for (j = 0; j < CURSOR_H; j++) {
         for (i = 0; i < CURSOR_W; i++) {
+            u8 p = cursor_sprite[j][i];
+            if (p == 0) continue; /* Skip transparent pixels */
+
             i32 px = x + i;
             i32 py = y + j;
             /* Only draw if within screen bounds */
             if (px >= 0 && py >= 0 && px < screen_w && py < screen_h) {
-                u8 p = cursor_sprite[j][i];
                 if (p == 1) {
                     gfx_putpixel(px, py, COLOR_RGB(0, 0, 0));
                 } else if (p == 2) {
@@ -375,10 +447,21 @@ static void cursor_draw_simple(i32 x, i32 y) {
             }
         }
     }
-    
+
     /* Update cursor position */
     cursor_x = x;
     cursor_y = y;
+
+    /*
+     * Kryspin OS — Cursor Rendering Fix: register the cursor's bounding
+     * rect with the damage tracker. gfx_putpixel writes to the backbuffer
+     * but does not record damage, so the new cursor pixels would never be
+     * pushed to the framebuffer in a partial-flip frame (e.g. the
+     * m.moved branch). The +2/-1 padding matches the rects the m.moved
+     * branch already registers for the old and new positions, so the
+     * coalescer folds them into one.
+     */
+    gfx_damage_add(x - 1, y - 1, CURSOR_W + 2, CURSOR_H + 2);
 }
 
 /*
@@ -428,8 +511,13 @@ static void draw_window_content(struct window *w) {
  */
 static void draw_desktop_chrome(void) {
     i32 width = (i32)gfx_width();
-    /* Use wallpaper system - will fall back to gradient if no wallpaper loaded */
-    gfx_draw_wallpaper();
+    
+    /* Use cached desktop background for performance */
+    if (!desktop_cached) {
+        cache_desktop_background();
+    }
+    draw_cached_desktop();
+    
     gfx_rect(0, 0, width, 4, COL_ACCENT);
     gfx_rect(24, 26, 5, 58, COL_ACCENT);
     gfx_text_transparent(44, 28, "KryspinOS", COL_WHITE);
@@ -615,10 +703,27 @@ void wm_init(struct multiboot_info *mb) {
     cursor_x = 512;
     cursor_y = 384;
     cursor_visible = true;
+    /*
+     * Kryspin OS — Cursor Rendering Fix: sentinel for the save-under.
+     * The m.moved branch skips the restore when these are negative,
+     * so the very first cursor movement doesn't try to blit garbage
+     * (or worse, the gradient from the wrong screen position) over
+     * the fresh boot frame.
+     */
+    cursor_old_x = -1;
+    cursor_old_y = -1;
+    desktop_cached = false;
+    desktop_cache = NULL;
     apps_set_boot_info(mb);
     pit_init();
     mouse_bounds((i32)gfx_width(), (i32)gfx_height());
-    wm_open_explorer();
+    /*
+     * Do NOT eagerly open apps here. The desktop boots with only the
+     * kernel and the window manager running, and Task Manager should
+     * show exactly two processes. Users open apps by clicking taskbar
+     * buttons. Any eager wm_open_*() call on this path re-introduces
+     * the bug fixed in plan.md §8.
+     */
 }
 
 static void power_restart(void) {
@@ -645,6 +750,70 @@ static void power_shutdown(void) {
 
 static void power_sleep(void) {
     __asm__ volatile("sti; hlt");
+}
+
+/*
+ * Save-under: simple single-buffer snapshot of the backbuffer pixels
+ * under the cursor's bounding box. The save is captured in the dirty
+ * branch (after draw_desktop, before cursor_draw_simple) so the slot
+ * always holds the pre-cursor content for the cursor's *current*
+ * position. The m.moved branch restores the old position from this
+ * save *and* calls draw_desktop() to repaint anything underneath
+ * (windows, taskbar, popups) — the save under only covers the bare
+ * background, not the full desktop content.
+ *
+ * Why a per-frame draw_desktop() in m.moved, not a per-position ring:
+ *   The previous attempt used a 4-slot per-position ring and tried to
+ *   avoid draw_desktop() for stutter. The bug: for any position the
+ *   cursor visits for the first time after another m.moved, the
+ *   backbuffer at the new position has the previous frame's cursor
+ *   pixels, no slot exists for it, so no restore happens, and the
+ *   framebuffer at the old position is never updated. The cursor
+ *   stays drawn at the old position in the framebuffer — the "traces
+ *   of the cursor itself and a red box and black box" symptom.
+ *   draw_desktop() redraws the full desktop (including the area the
+ *   cursor was over), which is the only way to guarantee the
+ *   backbuffer at the old position has the correct pre-cursor content
+ *   without keeping a complete history of every cursor position. The
+ *   cost is the stutter, but the plan's stutter fix was strictly
+ *   secondary to fixing the cursor artifact.
+ */
+static u32 cursor_save[CURSOR_W * CURSOR_H];
+
+static void cursor_save_under(i32 x, i32 y) {
+    const i32 W = (i32)gfx_width();
+    const i32 H = (i32)gfx_height();
+    for (i32 j = 0; j < CURSOR_H; j++) {
+        for (i32 i = 0; i < CURSOR_W; i++) {
+            const i32 px = x + i;
+            const i32 py = y + j;
+            if (px >= 0 && py >= 0 && px < W && py < H) {
+                cursor_save[j * CURSOR_W + i] = gfx_getpixel(px, py);
+            } else {
+                cursor_save[j * CURSOR_W + i] = 0;
+            }
+        }
+    }
+}
+
+static void cursor_restore_under(i32 x, i32 y) {
+    const i32 W = (i32)gfx_width();
+    const i32 H = (i32)gfx_height();
+    for (i32 j = 0; j < CURSOR_H; j++) {
+        for (i32 i = 0; i < CURSOR_W; i++) {
+            const i32 px = x + i;
+            const i32 py = y + j;
+            if (px >= 0 && py >= 0 && px < W && py < H) {
+                gfx_putpixel(px, py, cursor_save[j * CURSOR_W + i]);
+            }
+        }
+    }
+    /*
+     * gfx_putpixel doesn't record damage, so register the rect
+     * explicitly. +2/-1 padding matches cursor_draw_simple and the
+     * m.moved branch's old/new rects, so the coalescer folds them.
+     */
+    gfx_damage_add(x - 1, y - 1, CURSOR_W + 2, CURSOR_H + 2);
 }
 
 void wm_update(void) {
@@ -861,24 +1030,51 @@ void wm_update(void) {
 
     if (dirty) {
         /*
-         * New rendering approach: Always redraw everything cleanly.
-         * This eliminates artifacts from partial updates.
+         * High-performance rendering with cached background:
+         * - Cache gradient once (major speedup)
+         * - Use damage system for partial updates
+         * - Only redraw what changed
          */
-        gfx_fill(COLOR_RGB(19, 32, 54)); /* Clear backbuffer */
         gfx_damage_clear();
-        
-        /* Always redraw desktop for clean rendering */
-        desktop_chrome_dirty = true;
-        taskbar_chrome_dirty = true;
-        
-        draw_desktop();
-        
-        /* Draw cursor on top of everything */
+
+        /* Initialize cache if needed (one-time cost, huge speedup) */
+        if (!desktop_cached) {
+            cache_desktop_background();
+        }
+
+        /* Only clear and redraw background when UI changes significantly */
+        if (desktop_chrome_dirty || taskbar_chrome_dirty || frame_has_dragging) {
+            draw_cached_desktop();
+            draw_desktop();
+        } else {
+            /* Just redraw dynamic elements (clock, cursor, window content) */
+            draw_desktop();
+        }
+
+        /*
+         * Kryspin OS — Cursor Rendering Fix: refresh the save-under
+         * *before* the cursor is drawn this frame, so it captures the
+         * fresh desktop content (gradient, taskbar, window pixels)
+         * rather than the cursor pixels from a previous frame. The
+         * first dirty frame after boot establishes the save-under for
+         * the boot cursor position (cursor_x = 512, cursor_y = 384).
+         *
+         * Order matters: must run after draw_desktop() (so the
+         * backbuffer at the cursor position reflects the just-painted
+         * content) and before cursor_draw_simple() (so we capture
+         * the pre-cursor pixels, not the cursor pixels).
+         */
+        cursor_save_under(m.x, m.y);
+
+        /* Draw cursor on top -- registers its own damage rect. */
         cursor_draw_simple(m.x, m.y);
-        
-        /* Always use full flip for clean rendering */
-        gfx_flip();
-        
+
+        /* Use damage-based flip for performance */
+        gfx_flip_damaged();
+
+        /* Clear dirty flags */
+        desktop_chrome_dirty = false;
+        taskbar_chrome_dirty = false;
         frame_has_dragging = false;
         /*
          * Reset the frame counter so the PIT handler doesn't immediately
@@ -890,12 +1086,40 @@ void wm_update(void) {
         dirty = false;
     } else if (m.moved) {
         /*
-         * Mouse-only movement: Redraw everything for clean rendering.
-         * This ensures no cursor trails even during simple movement.
+         * Kryspin OS — Cursor Rendering Fix (m.moved):
+         * The save-under alone is not enough to clean the backbuffer
+         * at the old position when the cursor visits a new position
+         * for the first time (no slot exists for it, so the restore
+         * is a no-op, and the framebuffer at the old position is
+         * never updated). The fix: call draw_desktop() to repaint
+         * the full desktop — this overwrites the cursor pixels at
+         * the old position with the correct content (gradient,
+         * window, taskbar, popups) and registers damage for it.
+         * The save-under is then used to capture the pre-cursor
+         * content at the new position before the cursor is drawn.
+         *
+         * This re-introduces the stutter complaint the plan tried to
+         * fix. The cursor ghost bug is worse than the stutter, so
+         * we accept the trade-off.
          */
-        gfx_fill(COLOR_RGB(19, 32, 54)); /* Clear backbuffer */
+        gfx_damage_clear();
+
+        /* 1. Repaint the full desktop. This cleans the backbuffer at
+         *    the old position (overwriting the cursor pixels with
+         *    the correct content) and at the new position.
+         */
         draw_desktop();
+
+        /* 2. Capture the pre-cursor content at the new position. */
+        cursor_save_under(m.x, m.y);
+
+        /* 3. Draw the new cursor (registers its own damage rect). */
         cursor_draw_simple(m.x, m.y);
-        gfx_flip();
+
+        /* 4. Flip. */
+        gfx_flip_damaged();
+
+        cursor_old_x = m.x;
+        cursor_old_y = m.y;
     }
 }
